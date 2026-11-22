@@ -18,6 +18,14 @@ Steps:
 3. **Positive control per path.** A reads the marker back through each path. A
    path A cannot read herself is *not exercised*: it can never count as OK.
 4. **B reads** every path with A's identifiers, and lists/searches without them.
+5. **Awkward-id pairs** (only with identities the operator supplies). An extra
+   identity whose id is related to A's in a way sloppy scoping code confuses
+   (a string prefix, a ``.`` or other separator inside a label, a wildcard
+   character, letter case, surrounding whitespace) searches and reads *its own*
+   namespace and must not get A's marker. The probe never invents an identity.
+6. **Write paths** (only with ``write_paths=True``). B tries to update or
+   delete A's thread and to overwrite or delete A's Store item, each on a fresh
+   throwaway object the probe created for that one attempt; A then re-reads it.
 
 Grades: ``LEAK`` (B obtained A's marker on a path whose control held, and auth
 is enforced), ``OK`` (no path leaked and at least one was exercised),
@@ -36,6 +44,7 @@ import hashlib
 import json
 import secrets
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -52,11 +61,117 @@ P_LEAK = "LEAK"
 P_OK = "OK"
 P_NOT_EXERCISED = "NOT_EXERCISED"
 P_NOT_RUN = "NOT_RUN"
+P_OBSERVATION = "OBSERVATION"      # B's write call was accepted, A's data did not change
+
+# Awkward-id relationships between an extra identity and identity A.
+EDGE_KINDS = ("prefix", "dot", "separator", "wildcard", "case", "whitespace")
+EDGE_PATHS = {
+    "prefix": "store_search_own_prefix",
+    "dot": "store_edge_dot",
+    "separator": "store_edge_separator",
+    "wildcard": "store_edge_wildcard",
+    "case": "store_edge_case",
+    "whitespace": "store_edge_whitespace",
+}
+_EDGE_WHAT = {
+    "prefix": "B searches B's own namespace and gets A's item",
+    "dot": "a dotted-id identity gets A's item from its own namespace",
+    "separator": "a separator-id ( / : | ) identity gets A's item from its own namespace",
+    "wildcard": "a wildcard-id ( % _ * ) identity gets A's item from its own namespace",
+    "case": "a case-variant-id identity gets A's item from its own namespace",
+    "whitespace": "a whitespace-variant-id identity gets A's item from its own namespace",
+}
+_NO_EDGE_IDENTITY = ("no identity of this kind was supplied "
+                     "(--edge-identity KIND=TOKEN@NAMESPACE)")
+_WRITES_OFF = ("write paths are off; --write-paths sends update and delete calls at this "
+               "run's own throwaway data")
+_SEPARATORS = "/:|"
+_WILDCARDS = "%_*?["
+
+# By-id write attempts, in the order they run (the two deletes last).
+WRITE_PATHS = ("thread_update", "store_put_overwrite", "thread_delete", "store_delete")
+_WRITE_WHAT = {
+    "thread_update": "B updates A's thread by id",
+    "store_put_overwrite": "B overwrites A's memory item by namespace and key",
+    "thread_delete": "B deletes A's thread by id",
+    "store_delete": "B deletes A's memory item by namespace and key",
+}
 
 __all__ = [
-    "LEAK", "OBSERVATION", "OK", "INCONCLUSIVE",
-    "AgentMemoryReport", "run_agent_memory_probe",
+    "LEAK", "OBSERVATION", "OK", "INCONCLUSIVE", "EDGE_KINDS", "EDGE_PATHS", "WRITE_PATHS",
+    "AgentMemoryReport", "run_agent_memory_probe", "parse_edge_identity", "parse_namespace",
 ]
+
+
+def parse_namespace(text: Any) -> Optional[List[str]]:
+    """A namespace option: a JSON list of labels, or labels joined by dots.
+
+    ``alice.notes`` is ``["alice", "notes"]``. A label that itself contains a
+    dot can only be written as JSON: ``["acme.alice", "notes"]``.
+    """
+    if text is None or isinstance(text, (list, tuple)):
+        return list(text) if text is not None else None
+    text = str(text)
+    if text.lstrip().startswith("["):
+        try:
+            labels = json.loads(text)
+        except ValueError as exc:
+            raise ValueError(f"namespace is not a valid JSON list: {exc}")
+        if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
+            raise ValueError("namespace JSON must be a list of strings")
+        return labels
+    return [p for p in text.split(".") if p]
+
+
+def parse_edge_identity(spec: str) -> Dict[str, Any]:
+    """Parse ``KIND=TOKEN[@NAMESPACE]`` (the ``--edge-identity`` syntax).
+
+    ``KIND`` is one of :data:`EDGE_KINDS`. ``NAMESPACE`` is that identity's own
+    Store namespace: a JSON list of labels, or otherwise ONE label taken exactly
+    as written (it is not split on dots, because the label is the point).
+    """
+    kind, eq, rest = str(spec).partition("=")
+    kind = kind.strip().lower()
+    if not eq or kind not in EDGE_KINDS:
+        raise ValueError("--edge-identity must look like KIND=TOKEN[@NAMESPACE], with KIND "
+                         "one of: " + ", ".join(EDGE_KINDS))
+    token, at, namespace = rest.partition("@")
+    if not token:
+        raise ValueError(f"--edge-identity {kind}=... has no token")
+    labels: Optional[List[str]] = None
+    if at:
+        labels = parse_namespace(namespace) if namespace.lstrip().startswith("[") else [namespace]
+    return {"kind": kind, "token": token, "namespace": labels}
+
+
+def _edge_shape_problem(kind: str, own: List[str], base: List[str]) -> Optional[str]:
+    """Why ``own`` (the extra identity's namespace) is not a ``kind`` relative of
+    ``base`` (the namespace A was given); None when it is."""
+    if not own:
+        return "no namespace was given for this identity"
+    head = base[:len(own)]
+    if head == own:
+        return "that namespace is inside A's own, so it is not another identity's"
+    if kind == "prefix":
+        if not ".".join(base).startswith(".".join(own)):
+            return ("the namespace is not a string-but-not-segment prefix of A's namespace; "
+                    "give prefix-sibling ids (e.g. ali / alice) to run this")
+    elif kind == "dot":
+        if not any("." in label for label in own + base):
+            return "neither namespace has a label containing '.'"
+    elif kind == "separator":
+        if not any(ch in label for label in own + base for ch in _SEPARATORS):
+            return "neither namespace has a label containing '/', ':' or '|'"
+    elif kind == "wildcard":
+        if not any(ch in label for label in own for ch in _WILDCARDS):
+            return "the identity's namespace has no wildcard character (% _ * ? [)"
+    elif kind == "case":
+        if [x.casefold() for x in own] != [x.casefold() for x in head]:
+            return "the namespace does not differ from A's only in letter case"
+    elif kind == "whitespace":
+        if [x.strip() for x in own] != [x.strip() for x in head]:
+            return "the namespace does not differ from A's only in whitespace"
+    return None
 
 
 def _fp(value: Optional[str]) -> Optional[str]:
@@ -143,7 +258,18 @@ class AgentMemoryReport:
 
     def summary(self) -> str:
         lines = [f"{self.grade}: {self.detail}"]
+        # Paths left out for one shared reason (no extra identity, writes off)
+        # are listed on one line, where the first of them would have been.
+        shared: Dict[str, List[str]] = {}
         for path in self.paths:
+            if path["outcome"] == P_NOT_RUN and path.get("note") in (_NO_EDGE_IDENTITY, _WRITES_OFF):
+                shared.setdefault(path["note"], []).append(path["name"])
+        for path in self.paths:
+            names = shared.get(path.get("note") or "") if path["outcome"] == P_NOT_RUN else None
+            if names and len(names) > 1:
+                if path["name"] == names[0]:
+                    lines.append(f"  {P_NOT_RUN:<14} {', '.join(names)} ({path['note']})")
+                continue
             note = f" ({path['note']})" if path.get("note") else ""
             lines.append(f"  {path['outcome']:<14} {path['name']}: {path['what']}{note}")
         for observation in self.observations:
@@ -162,6 +288,12 @@ class AgentMemoryReport:
         if self.missing_inputs.get("namespace_b"):
             parts.append("to also test the Store namespace boundary: --namespace-b "
                          "(with prefix-sibling ids)")
+        edge = self.missing_inputs.get("edge")
+        if edge:
+            parts.append("to also test awkward-id pairs (" + ", ".join(edge) + "): "
+                         "--edge-identity KIND=TOKEN@NAMESPACE")
+        if self.missing_inputs.get("write_paths"):
+            parts.append("to also test writes to A's data: --write-paths")
         if not parts:
             return ""
         return "hint: " + "; ".join(parts) + "; see docs/AGENT-MEMORY.md"
@@ -178,6 +310,8 @@ def run_agent_memory_probe(
     save_input: Optional[Dict[str, Any]] = None,
     recall_input: Optional[Dict[str, Any]] = None,
     whoami_field: Optional[str] = None,
+    edge_identities: Optional[Sequence[Dict[str, Any]]] = None,
+    write_paths: bool = False,
     timeout: float = 20.0,
     authorized: bool = False,
     authorization_note: Optional[str] = None,
@@ -197,6 +331,18 @@ def run_agent_memory_probe(
     probe's marker; without them the through-the-agent paths are not run.
     ``whoami_field`` names a field of the run output that carries the caller's
     identity, if the app has one.
+
+    ``edge_identities`` is a list of ``{"kind", "token", "namespace"}`` dicts
+    (see :func:`parse_edge_identity`): extra test identities the operator has
+    provisioned whose ids are awkward relatives of A's. Each is used only as
+    itself, in its own namespace, through the same documented calls; a kind
+    with no identity is reported NOT_RUN. ``namespace_b`` with prefix-sibling
+    ids keeps working and is the same thing as a ``prefix`` edge identity that
+    uses B's token.
+
+    ``write_paths`` turns on the four by-id write attempts
+    (:data:`WRITE_PATHS`). They are off by default because they send update and
+    delete calls; they only ever name objects this run created for the purpose.
     """
     authorize(url, authorized=authorized, authorization_note=authorization_note)
 
@@ -221,6 +367,11 @@ def run_agent_memory_probe(
             relevant["agent"] = missing_inputs["agent"]
         if missing_inputs.get("namespace_b") and "store_search_own_prefix" in not_run:
             relevant["namespace_b"] = missing_inputs["namespace_b"]
+        unsupplied = [k for k in missing_inputs.get("edge", []) if EDGE_PATHS[k] in not_run]
+        if unsupplied:
+            relevant["edge"] = unsupplied
+        if missing_inputs.get("write_paths") and not_run & set(WRITE_PATHS):
+            relevant["write_paths"] = missing_inputs["write_paths"]
         return AgentMemoryReport(url, grade, detail, paths, controls, observations, fingerprints,
                                  relevant)
 
@@ -235,6 +386,21 @@ def run_agent_memory_probe(
         missing_inputs["agent"] = agent_flags
     if not namespace_b:
         missing_inputs["namespace_b"] = ["--namespace-b"]
+
+    edges: Dict[str, List[Dict[str, Any]]] = {kind: [] for kind in EDGE_KINDS}
+    for identity in edge_identities or ():
+        if identity.get("kind") not in EDGE_KINDS:
+            raise ValueError("edge identity kind must be one of: " + ", ".join(EDGE_KINDS))
+        edges[identity["kind"]].append(identity)
+    if namespace_b and not edges["prefix"]:      # the older spelling of the prefix case
+        edges["prefix"].append({"kind": "prefix", "token": token_b, "namespace": list(namespace_b),
+                                "is_b": True})
+    missing_inputs["edge"] = [kind for kind in EDGE_KINDS if not edges[kind] and kind != "prefix"]
+    if not write_paths:
+        missing_inputs["write_paths"] = ["--write-paths"]
+    fingerprints["edge_identities"] = [
+        {"kind": identity["kind"], "token": _fp(identity.get("token"))}
+        for kind in EDGE_KINDS for identity in edges[kind] if not identity.get("is_b")]
 
     a = _Caller(url, token_a, timeout)
     b = _Caller(url, token_b, timeout)
@@ -271,6 +437,7 @@ def run_agent_memory_probe(
                  {"namespace": namespace, "key": item_key, "value": {"text": marker}})
     controls["a_store_put_status"] = put.status
     dotted = ".".join(namespace)
+    dotted_q = urllib.parse.quote(dotted, safe=".")      # as it goes into a query string
 
     # -- 3 + 4. each path: A's control, then B ------------------------------
     def path(name: str, what: str, method: str, route: str, body: Any = None,
@@ -297,42 +464,98 @@ def run_agent_memory_probe(
          enabled=run_planted, why_not="no save_input given, so nothing was saved through the agent")
     path("thread_search", "B lists threads and finds A's", "POST", "/threads/search", {"limit": 100})
     path("store_get", "B reads A's memory item by namespace and key", "GET",
-         f"/store/items?namespace={dotted}&key={item_key}")
+         f"/store/items?namespace={dotted_q}&key={item_key}")
     path("store_search_namespace", "B searches A's memory namespace", "POST",
          "/store/items/search", {"namespace_prefix": namespace, "limit": 100})
     path("store_search_all", "B searches all memory with no namespace", "POST",
          "/store/items/search", {"namespace_prefix": [], "limit": 100})
 
-    # B's OWN namespace search: with prefix-sibling ids, a store that matches
-    # namespace prefixes as strings rather than segments returns A's item.
-    own_name, own_what = "store_search_own_prefix", "B searches B's own namespace and gets A's item"
-    if namespace_b:
-        ns_b = list(namespace_b)
-        dotted_b = ".".join(ns_b)
-        is_string_prefix = dotted.startswith(dotted_b)
-        is_segment_prefix = namespace[:len(ns_b)] == ns_b
-        if is_string_prefix and not is_segment_prefix:
-            b_put = b.call("PUT", "/store/items",
-                           {"namespace": ns_b + [tag], "key": item_key, "value": {"text": "own-" + tag}})
-            own_search = b.call("POST", "/store/items/search",
-                                {"namespace_prefix": ns_b, "limit": 100})
-            controls["b_store_put_status"] = b_put.status
-            if ("own-" + tag) not in own_search.body:
-                paths.append({"name": own_name, "what": own_what, "outcome": P_NOT_EXERCISED,
-                              "control_status": own_search.status,
-                              "note": f"B could not read B's own item this way (HTTP {own_search.status})"})
-            else:
-                seen = marker in own_search.body
-                paths.append({"name": own_name, "what": own_what,
-                              "outcome": P_LEAK if seen else P_OK, "b_status": own_search.status,
-                              "note": f"namespaces are prefix siblings ({dotted_b!r} vs {dotted!r})"})
-        else:
-            paths.append({"name": own_name, "what": own_what, "outcome": P_NOT_RUN,
-                          "note": "namespace_b is not a string-but-not-segment prefix of A's "
-                                  "namespace; give prefix-sibling ids (e.g. ali / alice) to run this"})
-    else:
-        paths.append({"name": own_name, "what": own_what, "outcome": P_NOT_RUN,
-                      "note": "needs namespace_b (B's own namespace) with a prefix-sibling id"})
+    # Awkward-id pairs. Each extra identity acts only as itself, in its own
+    # namespace: a store or scope check that compares ids loosely hands it A's item.
+    a_item = a.call("GET", f"/store/items?namespace={dotted_q}&key={item_key}")
+    if marker not in a_item.body:      # a dotted label cannot be named in a query string
+        a_item = a.call("POST", "/store/items/search", {"namespace_prefix": namespace, "limit": 100})
+    a_item_ok = marker in a_item.body
+    base_namespace = list(namespace_a) if namespace_a else []
+
+    def edge_attempt(kind: str, identity: Dict[str, Any]) -> Tuple[str, str, Optional[int]]:
+        own_ns = list(identity.get("namespace") or [])
+        who = "B" if identity.get("is_b") else "this identity"
+        if not identity.get("token") or identity["token"] == token_a:
+            return P_NOT_RUN, "the identity's token is missing or is identity A's", None
+        problem = _edge_shape_problem(kind, own_ns, base_namespace or namespace)
+        if problem:
+            return P_NOT_RUN, problem, None
+        if not a_item_ok:
+            return (P_NOT_EXERCISED,
+                    f"A could not read her own Store item (HTTP {a_item.status}), so there "
+                    "was nothing to reach", None)
+        caller = _Caller(url, identity["token"], timeout)
+        own_marker = "st-own-" + secrets.token_hex(8)
+        # Its own key, so that a store that folds the two namespaces together
+        # keeps both items and the search can show A's.
+        own_put = caller.call("PUT", "/store/items", {"namespace": own_ns + [tag], "key": "st-own",
+                                                     "value": {"text": own_marker}})
+        search = caller.call("POST", "/store/items/search",
+                             {"namespace_prefix": own_ns, "limit": 100})
+        # The same item addressed inside this identity's own namespace: its own
+        # labels in place of A's leading ones, and A's dotted text where its
+        # own dotted text is the beginning of it.
+        candidates = []
+        if len(own_ns) <= len(namespace):
+            candidates.append(".".join(own_ns + namespace[len(own_ns):]))
+        if dotted.startswith(".".join(own_ns)):
+            candidates.append(dotted)
+        by_key = [caller.call("GET", f"/store/items?namespace={urllib.parse.quote(c, safe='.')}"
+                                     f"&key={item_key}")
+                  for c in dict.fromkeys(candidates)]
+        listing = caller.call("POST", "/store/namespaces", {"prefix": own_ns, "limit": 100})
+        listed = listing.json() if isinstance(listing.json(), dict) else {}
+        if put.status in (200, 204) and list(namespace) in [
+                list(ns) for ns in (listed.get("namespaces") or []) if isinstance(ns, list)]:
+            edge_sees_name.append(kind)
+        if marker in search.body:
+            return P_LEAK, f"{who}'s own-namespace search returned A's item", search.status
+        if any(marker in got.body for got in by_key):
+            return P_LEAK, f"{who}'s read by key inside its own namespace returned A's item", \
+                search.status
+        if own_marker not in search.body:
+            return (P_NOT_EXERCISED,
+                    f"{who} could not store and read back its own item (put HTTP "
+                    f"{own_put.status}, search HTTP {search.status}); the server may not accept "
+                    "an id of this shape", search.status)
+        return P_OK, "own-namespace search and read by key returned only its own data", \
+            search.status
+
+    edge_sees_name: List[str] = []
+
+    def edge_case(kind: str) -> None:
+        name, what = EDGE_PATHS[kind], _EDGE_WHAT[kind]
+        identities = edges[kind]
+        if not identities:
+            why = ("needs namespace_b (B's own namespace) with a prefix-sibling id"
+                   if kind == "prefix" else _NO_EDGE_IDENTITY)
+            paths.append({"name": name, "what": what, "outcome": P_NOT_RUN, "note": why})
+            return
+        results = [edge_attempt(kind, identity) for identity in identities]
+        outcomes = [r[0] for r in results]
+        for wanted in (P_LEAK, P_OK, P_NOT_EXERCISED, P_NOT_RUN):
+            if wanted in outcomes:
+                outcome = wanted
+                break
+        chosen = next(r for r in results if r[0] == outcome)
+        note = chosen[1]
+        if len(results) > 1:
+            counts = ", ".join(f"{outcomes.count(o)} {o}" for o in dict.fromkeys(outcomes))
+            note += f"; {len(results)} identities of this kind: {counts}"
+        entry = {"name": name, "what": what, "outcome": outcome, "note": note,
+                 "identities": len(results)}
+        if chosen[2] is not None:
+            entry["b_status"] = chosen[2]
+        paths.append(entry)
+
+    for kind in EDGE_KINDS:
+        edge_case(kind)
 
     # Through the agent: B asks, in B's own thread, for what A saved.
     recall_name, recall_what = "agent_recall", "B asks the agent for A's memory"
@@ -377,15 +600,119 @@ def run_agent_memory_probe(
     namespace_visible = put.status in (200, 204) and list(namespace) in listed_namespaces
     controls["b_sees_a_namespace_name"] = namespace_visible
 
+    # By-id writes. Each attempt gets its own fresh object, A proves she can do
+    # the same write to her own data (the control), and A's re-read is the oracle.
+    def write_result(name: str, control_ok: bool, control_note: str, attempt: _Response,
+                     after: _Response, crossed: bool, readable: bool) -> None:
+        what = _WRITE_WHAT[name]
+        if not control_ok:
+            paths.append({"name": name, "what": what, "outcome": P_NOT_EXERCISED,
+                          "note": control_note})
+        elif crossed:
+            paths.append({"name": name, "what": what, "outcome": P_LEAK, "b_status": attempt.status,
+                          "note": f"write crossed identities: B got HTTP {attempt.status} and "
+                                  "A's data changed"})
+        elif not readable:
+            paths.append({"name": name, "what": what, "outcome": P_NOT_EXERCISED,
+                          "b_status": attempt.status,
+                          "note": f"A could not re-read her data afterwards (HTTP {after.status})"})
+        elif 200 <= attempt.status < 300:
+            paths.append({"name": name, "what": what, "outcome": P_OBSERVATION,
+                          "b_status": attempt.status,
+                          "note": f"B's call was accepted (HTTP {attempt.status}) but A's data "
+                                  "did not change"})
+        else:
+            paths.append({"name": name, "what": what, "outcome": P_OK, "b_status": attempt.status,
+                          "note": f"B got HTTP {attempt.status}; A's data is unchanged"})
+
+    def new_thread() -> Optional[str]:
+        made = a.call("POST", "/threads", {"metadata": {"st_probe": tag, "st_marker": marker}})
+        return (made.json() or {}).get("thread_id") if made.status == 200 else None
+
+    def item_route(key: str) -> str:
+        return f"/store/items?namespace={dotted_q}&key={key}"
+
+    def gone(response: _Response) -> bool:
+        return response.status in (200, 404) and marker not in response.body
+
+    why_no_writes = ""
+    if not write_paths:
+        why_no_writes = _WRITES_OFF
+    elif not auth_enforced:
+        why_no_writes = "the server does not authenticate callers, so no write was attempted"
+    for name in WRITE_PATHS:
+        if why_no_writes:
+            paths.append({"name": name, "what": _WRITE_WHAT[name], "outcome": P_NOT_RUN,
+                          "note": why_no_writes})
+            continue
+        touch = "st-touch-" + secrets.token_hex(8)
+        proof = "st-ctl-" + secrets.token_hex(8)
+        if name == "thread_update":
+            target = new_thread()
+            route = f"/threads/{target}"
+            if target:
+                a.call("PATCH", route, {"metadata": {"st_ctl": proof}})
+            before = a.call("GET", route) if target else _Response(0, "")
+            attempt = b.call("PATCH", route, {"metadata": {"st_touch": touch}}) if target \
+                else _Response(0, "")
+            after = a.call("GET", route) if target else _Response(0, "")
+            write_result(name, bool(target) and proof in before.body and marker in before.body,
+                         f"A could not update her own thread (HTTP {before.status})",
+                         attempt, after, touch in after.body or gone(after),
+                         marker in after.body)
+        elif name == "store_put_overwrite":
+            key = "st-item-put"
+            a.call("PUT", "/store/items", {"namespace": namespace, "key": key,
+                                          "value": {"text": marker}})
+            before = a.call("GET", item_route(key))
+            attempt = b.call("PUT", "/store/items", {"namespace": namespace, "key": key,
+                                                    "value": {"text": touch}})
+            after = a.call("GET", item_route(key))
+            write_result(name, marker in before.body,
+                         f"A could not write and read back her own item (HTTP {before.status})",
+                         attempt, after, touch in after.body or gone(after),
+                         marker in after.body)
+        elif name == "thread_delete":
+            spare, target = new_thread(), new_thread()
+            if spare:
+                a.call("DELETE", f"/threads/{spare}")
+            spare_after = a.call("GET", f"/threads/{spare}") if spare else _Response(0, "")
+            before = a.call("GET", f"/threads/{target}") if target else _Response(0, "")
+            control_ok = bool(spare and target) and gone(spare_after) and marker in before.body
+            attempt = b.call("DELETE", f"/threads/{target}") if control_ok else _Response(0, "")
+            after = a.call("GET", f"/threads/{target}") if control_ok else _Response(0, "")
+            write_result(name, control_ok,
+                         f"A could not delete a thread of her own (re-read HTTP {spare_after.status})",
+                         attempt, after, gone(after), marker in after.body)
+        else:  # store_delete
+            spare_key, key = "st-item-ctl", "st-item-del"
+            for each in (spare_key, key):
+                a.call("PUT", "/store/items", {"namespace": namespace, "key": each,
+                                              "value": {"text": marker}})
+            spare_before = a.call("GET", item_route(spare_key))
+            a.call("DELETE", "/store/items", {"namespace": namespace, "key": spare_key})
+            spare_after = a.call("GET", item_route(spare_key))
+            before = a.call("GET", item_route(key))
+            control_ok = (marker in spare_before.body and gone(spare_after)
+                          and marker in before.body)
+            attempt = b.call("DELETE", "/store/items", {"namespace": namespace, "key": key}) \
+                if control_ok else _Response(0, "")
+            after = a.call("GET", item_route(key)) if control_ok else _Response(0, "")
+            write_result(name, control_ok,
+                         f"A could not delete an item of her own (re-read HTTP {spare_after.status})",
+                         attempt, after, gone(after), marker in after.body)
+
     controls["whoami_a"] = _fp(whoami["a"]) if whoami["a"] else None
     controls["whoami_b"] = _fp(whoami["b"]) if whoami["b"] else None
 
     # -- grade --------------------------------------------------------------
     leaked = [p["name"] for p in paths if p["outcome"] == P_LEAK]
-    exercised = [p["name"] for p in paths if p["outcome"] in (P_LEAK, P_OK)]
+    accepted = [p["name"] for p in paths if p["outcome"] == P_OBSERVATION]
+    exercised = [p["name"] for p in paths if p["outcome"] in (P_LEAK, P_OK, P_OBSERVATION)]
     skipped = [p["name"] for p in paths if p["outcome"] == P_NOT_EXERCISED]
     if skipped:
-        observations.append("not exercised (A could not read her own marker): " + ", ".join(skipped))
+        observations.append("not exercised (a positive control did not hold): " + ", ".join(skipped))
+    controls["edge_sees_a_namespace_name"] = sorted(set(edge_sees_name))
 
     if not auth_enforced:
         observations.append(
@@ -401,13 +728,27 @@ def run_agent_memory_probe(
                       "B read A's marker, but the app reports the same identity for both tokens, "
                       "so this is one principal reading its own data.")
     if leaked:
-        return report(LEAK,
-                      f"identity B read identity A's memory on {len(leaked)} of {len(exercised)} "
-                      f"paths: {', '.join(leaked)}.")
+        written = [name for name in leaked if name in WRITE_PATHS]
+        by_edge = [name for name in leaked if name in EDGE_PATHS.values()
+                   and name != EDGE_PATHS["prefix"]]
+        detail = (f"identity B read identity A's memory on {len(leaked)} of {len(exercised)} "
+                  f"paths: {', '.join(leaked)}.")
+        if written or by_edge:
+            detail = (f"another identity reached identity A's memory on {len(leaked)} of "
+                      f"{len(exercised)} paths: {', '.join(leaked)}.")
+        if written:
+            detail += " A write crossed identities on: " + ", ".join(written) + "."
+        if by_edge:
+            detail += " An awkward-id identity read A's item on: " + ", ".join(by_edge) + "."
+        return report(LEAK, detail)
     if not exercised:
         return report(INCONCLUSIVE,
                       "no path could be exercised: A could not read her own marker back anywhere.")
-    if namespace_visible:
+    if accepted:
+        return report(OBSERVATION,
+                      "B could not read or change A's memory, but the server accepted B's write "
+                      "call on: " + ", ".join(accepted) + " (A's data did not change).")
+    if namespace_visible or edge_sees_name:
         return report(OBSERVATION,
                       "B could not read A's memory, but B can see that A's memory namespace exists.")
     return report(OK, f"identity B could not read identity A's memory on any of the "

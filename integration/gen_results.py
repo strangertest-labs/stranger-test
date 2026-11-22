@@ -786,7 +786,10 @@ _AGW_ACTOR_SOURCE = "crates/agentgateway/src/http/auth/oauth/mod.rs"
 def _actor_observation():
     d, link = _sample("agentgateway-actor_lies.json")
     m, mlink = _sample("agentgateway-actor_lies-may_act.json")
-    for x, lk in ((d, link), (m, mlink)):
+    st, slink = _sample("agentgateway-actor_lies-strict_login_server.json")
+    if (st.get("login_server") or {}).get("actor_check") != "strict":
+        raise GenError(f"{slink} was not run against the strict login server")
+    for x, lk in ((d, link), (m, mlink), (st, slink)):
         if x.get("probe") != "actor_lies" or x.get("grade") != "OBSERVATION":
             raise GenError(f"{lk} is not an actor_lies OBSERVATION run")
         if not x.get("control_reached_upstream_with_actor"):
@@ -809,8 +812,12 @@ def _actor_observation():
             f"`{_AGW_ACTOR_SOURCE}`, v1.7.0: `actor_token_from_request`, `may_act_authorizes`, "
             "`decode_unverified_jwt_claims`). Default config ([run]("
             f"{link})): {cases(d)}. With `enforceMayAct` ([run]({mlink})): {cases(m)}. "
-            "The test login server checks an actor token's signature, issuer and expiry, not "
-            "its audience."]
+            "In those two runs the test login server checks an actor token's signature, issuer "
+            "and expiry, not its audience or the client making the exchange. With the gateway "
+            "authenticating itself on the exchange (`clientAuth`, client `agent-client`) and "
+            "the test login server also requiring the actor token's audience to be the login "
+            "server and its subject to be that client ([run]("
+            f"{slink})): {cases(st)}. The control was granted in all three runs."]
 
 
 def _litellm_section():

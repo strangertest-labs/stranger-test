@@ -438,8 +438,14 @@ def cmd_confirm(args: argparse.Namespace) -> int:
         print("\n-- against a SAFE server (must come back clean):")
         _confirm_print(safe, args.json)
         works = dt.leaked(leaky) and str(getattr(safe, "grade", "")) == "OK"
+        seen = [f"leaky -> {dt._grade_of(leaky)}", f"safe -> {dt._grade_of(safe)}"]
+        for key, what, expected in getattr(t, "demo_extra", ()):
+            print(f"\n-- against {what}:")
+            _confirm_print(res[key], args.json)
+            works = works and dt._grade_of(res[key]) == expected
+            seen.append(f"{key.replace('_', ' ')} -> {dt._grade_of(res[key])}")
         print(f"\nVERDICT: the test {'WORKS' if works else 'did NOT behave as expected'} "
-              f"(leaky -> {dt._grade_of(leaky)}, safe -> {dt._grade_of(safe)}).")
+              f"({', '.join(seen)}).")
         return 0 if works else 2
 
     if not args.url:
@@ -465,7 +471,18 @@ def cmd_confirm(args: argparse.Namespace) -> int:
     # Options only some tests use; each test ignores the ones it does not know.
     opts = {name: getattr(args, name, None)
             for name in ("namespace_a", "namespace_b", "assistant_id", "save_input",
-                         "recall_input", "whoami_field")}
+                         "recall_input", "whoami_field", "base_query", "reworded_query",
+                         "threshold", "cache_mode", "identity_as", "identity_header",
+                         "token_header", "token_sibling", "api_key", "user_a", "user_b",
+                         "user_sibling", "store_path", "query_path", "chat_path", "model",
+                         "cache_hit_header", "edge_cases", "edge_identity", "edge_user",
+                         "route", "stream")}
+    from datetime import datetime, timezone
+
+    run_started = datetime.now(timezone.utc)
+    if t.id == "agent-memory":
+        opts.update(edge_identities=getattr(args, "edge_identity", None),
+                    write_paths=getattr(args, "write_paths", None) or None)
     try:
         rep = t.run_target(args.url, args.token_a, args.token_b,
                            **{k: v for k, v in opts.items() if v is not None})
@@ -473,6 +490,12 @@ def cmd_confirm(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 3
     _confirm_print(rep, args.json)
+    if getattr(args, "evidence", None):
+        from .evidence import write_evidence
+
+        write_evidence(args.evidence, rep, run_started=run_started,
+                       run_finished=datetime.now(timezone.utc))
+        print("evidence written: %s" % args.evidence, file=sys.stderr)
     hint = getattr(rep, "hint", None)
     if not args.json and callable(hint) and hint():
         print(hint())
@@ -599,7 +622,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     confirm.add_argument("test", nargs="?", help="which test (see --list)")
     confirm.add_argument("url", nargs="?", default=None, help="server URL for real-target mode: the MCP endpoint, or for "
-                              "agent-memory the agent server's base URL (e.g. http://127.0.0.1:2024)")
+                              "agent-memory the agent server's base URL (e.g. http://127.0.0.1:2024), "
+                              "or for semantic-cache the cache's or gateway's base URL")
     confirm.add_argument("--demo", action="store_true", help="run against bundled loopback fixtures")
     confirm.add_argument("--list", action="store_true", help="list the deep tests")
     confirm.add_argument("--token-a", dest="token_a", default=None, help="bearer token for identity A")
@@ -607,6 +631,8 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument("--allow-nonloopback", dest="allow_nonloopback", action="store_true",
                          help="permit a non-loopback target (authorized testing only)")
     confirm.add_argument("--json", action="store_true", help="JSON output")
+    confirm.add_argument("--evidence", default=None, metavar="FILE",
+                         help="also write a one-page evidence file (.md or .json); see docs/EVIDENCE.md")
     memory = confirm.add_argument_group(
         "agent-memory options",
         "For `confirm agent-memory <base-url>`. All optional: two tokens alone test the "
@@ -617,6 +643,17 @@ def build_parser() -> argparse.ArgumentParser:
     memory.add_argument("--namespace-b", dest="namespace_b", default=None,
                         help="identity B's own Store namespace, dotted; when B's id is a string "
                              "prefix of A's (ali / alice) this also checks namespace boundaries")
+    memory.add_argument("--edge-identity", dest="edge_identity", action="append", default=None,
+                        metavar="KIND=TOKEN[@NAMESPACE]",
+                        help="(agent-memory and semantic-cache) an extra test identity whose id is "
+                             "an awkward relative of A's, sent the way --token-a is; repeatable; "
+                             "a case with no identity given is not run; KIND is "
+                             "prefix, dot, separator, wildcard, case or whitespace; NAMESPACE is "
+                             "its own Store namespace (one label as written, or a JSON list). "
+                             "Repeatable")
+    memory.add_argument("--write-paths", dest="write_paths", action="store_true",
+                        help="also let B try to update and delete A's thread and Store item "
+                             "(only this run's own throwaway data; off by default)")
     memory.add_argument("--assistant", dest="assistant_id", default=None,
                         help="assistant (graph) id to run")
     memory.add_argument("--save-input", dest="save_input", default=None,
@@ -625,6 +662,71 @@ def build_parser() -> argparse.ArgumentParser:
                         help="JSON run input that makes the agent recall; must not contain {marker}")
     memory.add_argument("--whoami-field", dest="whoami_field", default=None,
                         help="field of the run output that carries the caller's identity, if any")
+    cache = confirm.add_argument_group(
+        "semantic-cache options",
+        "For `confirm semantic-cache <base-url>`. --token-a/--token-b are the two caller "
+        "identities. In store mode they are sent in the x-identity header unless you "
+        "say otherwise; in chat mode as bearer tokens. See docs/CACHE.md.")
+    cache.add_argument("--cache-mode", dest="cache_mode", default=None, choices=("store", "chat"),
+                       help="store (default): a cache with POST /store and POST /query. "
+                            "chat: an LLM gateway that caches POST /v1/chat/completions")
+    cache.add_argument("--identity-as", dest="identity_as", default=None,
+                       choices=("header", "bearer"),
+                       help="how --token-a/--token-b are sent: in the identity header, or as "
+                            "a bearer token / API key")
+    cache.add_argument("--identity-header", dest="identity_header", default=None,
+                       help="header that carries each identity's id (default: x-identity), "
+                            "e.g. x-tenant-id")
+    cache.add_argument("--token-header", dest="token_header", default=None,
+                       help="header that carries a token or API key (default: Authorization, "
+                            "sent as 'Bearer <token>'; any other header gets the raw value)")
+    cache.add_argument("--token-sibling", dest="token_sibling", default=None,
+                       help="a third identity whose id at the cache is a string prefix of A's "
+                            "(ali / alice); without it the prefix-sibling path is not run "
+                            "when tokens are used")
+    cache.add_argument("--api-key", dest="api_key", default=None,
+                       help="one credential shared by every request, for a cache that takes "
+                            "a key plus a tenant header or user field")
+    cache.add_argument("--user-a", dest="user_a", default=None,
+                       help="chat mode: identity A's value for the OpenAI 'user' body field")
+    cache.add_argument("--user-b", dest="user_b", default=None,
+                       help="chat mode: identity B's value for the 'user' body field")
+    cache.add_argument("--user-sibling", dest="user_sibling", default=None,
+                       help="chat mode: the prefix-sibling identity's 'user' value")
+    cache.add_argument("--store-path", dest="store_path", default=None,
+                       help="store mode: path of the store call (default: /store)")
+    cache.add_argument("--query-path", dest="query_path", default=None,
+                       help="store mode: path of the query call (default: /query)")
+    cache.add_argument("--chat-path", dest="chat_path", default=None,
+                       help="chat mode: path of the chat call (default: /v1/chat/completions)")
+    cache.add_argument("--model", dest="model", default=None,
+                       help="chat mode: model name to request (default: gpt-4o-mini)")
+    cache.add_argument("--cache-hit-header", dest="cache_hit_header", default=None,
+                       help="chat mode: response header that tells a cache hit; without it a "
+                            "few common ones are tried (x-litellm-cache-key, x-cache, ...)")
+    cache.add_argument("--edge-cases", dest="edge_cases", default=None, metavar="all|KIND,...",
+                       help="awkward-id cases to run: all, or a list of prefix, dot, separator, "
+                            "wildcard, case, whitespace. With plain header ids this also says "
+                            "they are free-form test tenants, and the ids are made from A's")
+    cache.add_argument("--edge-user", dest="edge_user", action="append", default=None,
+                       metavar="KIND=USER",
+                       help="chat mode: the extra identity's 'user' value for one awkward-id "
+                            "case; repeatable")
+    cache.add_argument("--route", dest="route", action="append", default=None,
+                       metavar="NAME[=PATH]",
+                       help="chat mode: a route to run, repeatable: chat, responses "
+                            "(/v1/responses) or messages (/v1/messages). Each is graded on "
+                            "its own, plus a cross-route path")
+    cache.add_argument("--stream", dest="stream", action="store_true", default=None,
+                       help="chat mode: send every request with \"stream\": true and read "
+                            "the answer from the event stream")
+    cache.add_argument("--base-query", dest="base_query", default=None,
+                       help="the question A caches (default: a built-in one)")
+    cache.add_argument("--reworded-query", dest="reworded_query", default=None,
+                       help="a near-match paraphrase of --base-query for the semantic path")
+    cache.add_argument("--threshold", dest="threshold", default=None,
+                       help="store mode: similarity threshold to send with each query "
+                            "(default: the cache's own)")
     confirm.set_defaults(func=cmd_confirm)
 
     return parser

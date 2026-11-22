@@ -1,5 +1,5 @@
 name: "Stranger Test"
-description: "Test an MCP server or a LangGraph agent server for cross-user leaks: a read-only scan, or a two-identity confirm."
+description: "Test an MCP server, a LangGraph agent server or a response cache for cross-user leaks: a read-only scan, or a two-identity confirm."
 author: "Vedant Agarwal"
 branding:
   icon: "shield"
@@ -7,22 +7,22 @@ branding:
 
 inputs:
   url:
-    description: "Endpoint to test, e.g. http://127.0.0.1:8080/mcp. For agent-memory, the agent server's base URL, e.g. http://127.0.0.1:2024. Only servers you run or are authorized to test."
+    description: "Endpoint to test, e.g. http://127.0.0.1:8080/mcp. For agent-memory, the agent server's base URL, e.g. http://127.0.0.1:2024. For semantic-cache, the cache's or gateway's base URL. Only servers you run or are authorized to test."
     required: true
   mode:
     description: "scan (read-only, one identity) or confirm (two identities)."
     required: false
     default: "scan"
   test:
-    description: "confirm only: the deep test to run (state-handle, tasks-idor, elicitation, agent-memory). See `stranger-test confirm --list`."
+    description: "confirm only: the deep test to run (state-handle, tasks-idor, elicitation, agent-memory, semantic-cache). See `stranger-test confirm --list`."
     required: false
     default: ""
   token-a:
-    description: "confirm only: bearer token for identity A. Pass a secret."
+    description: "confirm only: bearer token for identity A (semantic-cache: identity A's id or token, see identity-as). Pass a secret."
     required: false
     default: ""
   token-b:
-    description: "confirm only: bearer token for identity B. Pass a secret."
+    description: "confirm only: bearer token for identity B (semantic-cache: identity B's id or token). Pass a secret."
     required: false
     default: ""
   namespace-a:
@@ -47,6 +47,74 @@ inputs:
     default: ""
   whoami-field:
     description: "agent-memory only: field of the run output that carries the caller's identity, if any."
+    required: false
+    default: ""
+  cache-mode:
+    description: "semantic-cache only: store (a cache with POST /store and POST /query, the default) or chat (an LLM gateway that caches POST /v1/chat/completions)."
+    required: false
+    default: ""
+  identity-as:
+    description: "semantic-cache only: how token-a/token-b are sent: header (in the identity header) or bearer (a bearer token or API key). Default: header in store mode, bearer in chat mode."
+    required: false
+    default: ""
+  identity-header:
+    description: "semantic-cache only: header that carries each identity's id (default x-identity), e.g. x-tenant-id."
+    required: false
+    default: ""
+  token-header:
+    description: "semantic-cache only: header that carries a token or API key (default Authorization, sent as 'Bearer <token>'; any other header gets the raw value)."
+    required: false
+    default: ""
+  token-sibling:
+    description: "semantic-cache only: a third identity whose id at the cache is a string prefix of A's (ali / alice). Without it the prefix-sibling path is not run when tokens are used. Pass a secret."
+    required: false
+    default: ""
+  api-key:
+    description: "semantic-cache only: one credential shared by every request, for a cache that takes a key plus a tenant header or user field. Pass a secret."
+    required: false
+    default: ""
+  user-a:
+    description: "semantic-cache chat mode: identity A's value for the OpenAI 'user' body field."
+    required: false
+    default: ""
+  user-b:
+    description: "semantic-cache chat mode: identity B's value for the 'user' body field."
+    required: false
+    default: ""
+  user-sibling:
+    description: "semantic-cache chat mode: the prefix-sibling identity's 'user' value."
+    required: false
+    default: ""
+  store-path:
+    description: "semantic-cache store mode: path of the store call (default /store)."
+    required: false
+    default: ""
+  query-path:
+    description: "semantic-cache store mode: path of the query call (default /query)."
+    required: false
+    default: ""
+  chat-path:
+    description: "semantic-cache chat mode: path of the chat call (default /v1/chat/completions)."
+    required: false
+    default: ""
+  model:
+    description: "semantic-cache chat mode: model name to request (default gpt-4o-mini)."
+    required: false
+    default: ""
+  cache-hit-header:
+    description: "semantic-cache chat mode: response header that tells a cache hit. Without it a few common ones are tried."
+    required: false
+    default: ""
+  base-query:
+    description: "semantic-cache only: the question identity A caches (default: a built-in one)."
+    required: false
+    default: ""
+  reworded-query:
+    description: "semantic-cache only: a near-match paraphrase of base-query."
+    required: false
+    default: ""
+  threshold:
+    description: "semantic-cache store mode: similarity threshold to send with each query."
     required: false
     default: ""
   bearer:
@@ -99,6 +167,23 @@ runs:
         ST_SAVE_INPUT: ${{ inputs.save-input }}
         ST_RECALL_INPUT: ${{ inputs.recall-input }}
         ST_WHOAMI_FIELD: ${{ inputs.whoami-field }}
+        ST_CACHE_MODE: ${{ inputs.cache-mode }}
+        ST_IDENTITY_AS: ${{ inputs.identity-as }}
+        ST_IDENTITY_HEADER: ${{ inputs.identity-header }}
+        ST_TOKEN_HEADER: ${{ inputs.token-header }}
+        ST_TOKEN_SIBLING: ${{ inputs.token-sibling }}
+        ST_API_KEY: ${{ inputs.api-key }}
+        ST_USER_A: ${{ inputs.user-a }}
+        ST_USER_B: ${{ inputs.user-b }}
+        ST_USER_SIBLING: ${{ inputs.user-sibling }}
+        ST_STORE_PATH: ${{ inputs.store-path }}
+        ST_QUERY_PATH: ${{ inputs.query-path }}
+        ST_CHAT_PATH: ${{ inputs.chat-path }}
+        ST_MODEL: ${{ inputs.model }}
+        ST_CACHE_HIT_HEADER: ${{ inputs.cache-hit-header }}
+        ST_BASE_QUERY: ${{ inputs.base-query }}
+        ST_REWORDED_QUERY: ${{ inputs.reworded-query }}
+        ST_THRESHOLD: ${{ inputs.threshold }}
         ST_BEARER: ${{ inputs.bearer }}
         ST_SARIF_FILE: ${{ inputs.sarif-file }}
         ST_ALLOW_NONLOOPBACK: ${{ inputs.allow-nonloopback }}

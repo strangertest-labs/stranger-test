@@ -25,6 +25,13 @@ from login_faults_harness import FORBIDDEN_PORTS, fp, port_46xx  # noqa: E402
 
 _JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*")
 _SK_RE = re.compile(r"sk-[A-Za-z0-9_-]{8,}")
+# A client secret inside an embedded gateway config (e.g. clientAuth.clientSecret):
+# stored as a fingerprint, like every other credential in a saved run.
+_SECRET_FIELD_RE = re.compile(r"(clientSecret:\s*)([^\s\\\"]+)")
+
+
+def redact_config_secrets(text: str) -> str:
+    return _SECRET_FIELD_RE.sub(lambda m: m.group(1) + fp(m.group(2)), text)
 
 DEEPER_MODES = ("login_faults", "concurrent")
 
@@ -53,7 +60,7 @@ def save_run(gateway: str, name: str, payload: Dict[str, Any]) -> str:
     runs = os.environ.get("DEEPER_RUNS_DIR") or os.path.join(_HERE, "runs")
     os.makedirs(runs, exist_ok=True)
     out = os.path.join(runs, f"{gateway}-{name}-{int(time.time())}.json")
-    text = json.dumps(payload, indent=2, default=str)
+    text = redact_config_secrets(json.dumps(payload, indent=2, default=str))
     if _JWT_RE.search(text) or _SK_RE.search(text):
         raise SystemExit("refusing to save: a token or key is in the run")
     with open(out, "w") as f:

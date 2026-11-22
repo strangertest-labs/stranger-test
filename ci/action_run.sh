@@ -4,7 +4,7 @@
 # into the command line by the workflow, so a token or URL cannot inject shell.
 #
 #   ST_MODE               scan | confirm                      (default: scan)
-#   ST_URL                endpoint to test (agent-memory: the server's base URL) (required)
+#   ST_URL                endpoint to test (agent-memory, semantic-cache: the base URL) (required)
 #   ST_TEST               confirm only: which deep test       (e.g. state-handle)
 #   ST_TOKEN_A/ST_TOKEN_B confirm only: the two identities' bearer tokens
 #   ST_NAMESPACE_A/_B     agent-memory only: Store namespaces, dotted (alice.notes)
@@ -12,6 +12,18 @@
 #   ST_SAVE_INPUT         agent-memory only: JSON run input that saves; {marker} is replaced
 #   ST_RECALL_INPUT       agent-memory only: JSON run input that recalls
 #   ST_WHOAMI_FIELD       agent-memory only: run-output field carrying the caller's identity
+#   semantic-cache only (each maps to the --flag of the same name; see docs/CACHE.md):
+#   ST_CACHE_MODE         store | chat
+#   ST_IDENTITY_AS        header | bearer: how ST_TOKEN_A/_B are sent
+#   ST_IDENTITY_HEADER    header that carries each identity's id (default x-identity)
+#   ST_TOKEN_HEADER       header that carries a token or API key (default Authorization)
+#   ST_TOKEN_SIBLING      a third, prefix-sibling identity
+#   ST_API_KEY            one credential shared by every request
+#   ST_USER_A/_B/_SIBLING chat mode: values for the OpenAI "user" body field
+#   ST_STORE_PATH/ST_QUERY_PATH/ST_CHAT_PATH   request paths
+#   ST_MODEL              chat mode: model name to request
+#   ST_CACHE_HIT_HEADER   chat mode: response header that tells a cache hit
+#   ST_BASE_QUERY/ST_REWORDED_QUERY/ST_THRESHOLD   the question pair and threshold
 #   ST_BEARER             scan only: optional bearer token
 #   ST_SARIF_FILE         scan only: also write a SARIF 2.1.0 log to this path
 #   ST_ALLOW_NONLOOPBACK  "true" to permit a non-loopback target you may test
@@ -72,6 +84,24 @@ case "$mode" in
     if [ -n "${ST_SAVE_INPUT:-}" ]; then args+=(--save-input "$ST_SAVE_INPUT"); fi
     if [ -n "${ST_RECALL_INPUT:-}" ]; then args+=(--recall-input "$ST_RECALL_INPUT"); fi
     if [ -n "${ST_WHOAMI_FIELD:-}" ]; then args+=(--whoami-field "$ST_WHOAMI_FIELD"); fi
+    # Options only the semantic-cache test uses; other tests ignore them.
+    if [ -n "${ST_CACHE_MODE:-}" ]; then args+=(--cache-mode "$ST_CACHE_MODE"); fi
+    if [ -n "${ST_IDENTITY_AS:-}" ]; then args+=(--identity-as "$ST_IDENTITY_AS"); fi
+    if [ -n "${ST_IDENTITY_HEADER:-}" ]; then args+=(--identity-header "$ST_IDENTITY_HEADER"); fi
+    if [ -n "${ST_TOKEN_HEADER:-}" ]; then args+=(--token-header "$ST_TOKEN_HEADER"); fi
+    if [ -n "${ST_TOKEN_SIBLING:-}" ]; then args+=(--token-sibling "$ST_TOKEN_SIBLING"); fi
+    if [ -n "${ST_API_KEY:-}" ]; then args+=(--api-key "$ST_API_KEY"); fi
+    if [ -n "${ST_USER_A:-}" ]; then args+=(--user-a "$ST_USER_A"); fi
+    if [ -n "${ST_USER_B:-}" ]; then args+=(--user-b "$ST_USER_B"); fi
+    if [ -n "${ST_USER_SIBLING:-}" ]; then args+=(--user-sibling "$ST_USER_SIBLING"); fi
+    if [ -n "${ST_STORE_PATH:-}" ]; then args+=(--store-path "$ST_STORE_PATH"); fi
+    if [ -n "${ST_QUERY_PATH:-}" ]; then args+=(--query-path "$ST_QUERY_PATH"); fi
+    if [ -n "${ST_CHAT_PATH:-}" ]; then args+=(--chat-path "$ST_CHAT_PATH"); fi
+    if [ -n "${ST_MODEL:-}" ]; then args+=(--model "$ST_MODEL"); fi
+    if [ -n "${ST_CACHE_HIT_HEADER:-}" ]; then args+=(--cache-hit-header "$ST_CACHE_HIT_HEADER"); fi
+    if [ -n "${ST_BASE_QUERY:-}" ]; then args+=(--base-query "$ST_BASE_QUERY"); fi
+    if [ -n "${ST_REWORDED_QUERY:-}" ]; then args+=(--reworded-query "$ST_REWORDED_QUERY"); fi
+    if [ -n "${ST_THRESHOLD:-}" ]; then args+=(--threshold "$ST_THRESHOLD"); fi
     "${cmd[@]}" "${args[@]}" ${extra[@]+"${extra[@]}"} || code=$?
     # confirm: 0 OK, 1 LEAK/FAIL, 2 INCONCLUSIVE or OBSERVATION, 3 usage/refusal.
     ;;

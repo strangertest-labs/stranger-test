@@ -179,5 +179,88 @@ class ActionRunAgentMemory(unittest.TestCase):
         self.assertEqual(code, 3, out)
 
 
+@unittest.skipUnless(BASH, "bash not available")
+class ActionRunSemanticCache(unittest.TestCase):
+    """The semantic-cache test through the action's runner, against the bundled
+    stand-in cache. Its URL is the cache's base URL, not an MCP path."""
+
+    def _run(self, mode, server=None, **env):
+        from strangertest.practice_semantic_cache_http import build_server
+        with _serving(lambda p: build_server(mode, port=p, **(server or {}))) as mcp_url:
+            options = dict(ST_MODE="confirm", ST_TEST="semantic-cache",
+                           ST_URL=mcp_url[: -len("/mcp")],
+                           ST_TOKEN_A="tok-alice", ST_TOKEN_B="tok-bob")
+            options.update(env)
+            return _run(**options)
+
+    def test_store_shape_with_two_ids_only(self):
+        code, out = self._run("leaky")
+        self.assertEqual(code, 1, out)
+        self.assertIn("LEAK", out)
+        code, out = self._run("safe")
+        self.assertEqual(code, 0, out)
+
+    def test_identity_header_and_threshold_reach_the_tool(self):
+        server = {"identity_header": "x-tenant-id"}
+        code, out = self._run("leaky", server, ST_IDENTITY_HEADER="x-tenant-id",
+                              ST_THRESHOLD="1.0",
+                              ST_BASE_QUERY="Falcon wire transfer limit",
+                              ST_REWORDED_QUERY="wire transfer limit of Falcon, please")
+        self.assertEqual(code, 1, out)
+        self.assertIn("NOT_EXERCISED  reworded", out)     # threshold 1.0: exact matches only
+        code, out = self._run("leaky", server)            # ids sent in the wrong header
+        self.assertEqual(code, 0, out)
+        self.assertIn("::warning::", out)
+
+    def test_bearer_tokens_api_key_header_and_sibling(self):
+        server = {"auth": "token", "token_header": "x-api-key"}
+        env = dict(ST_IDENTITY_AS="bearer", ST_TOKEN_HEADER="x-api-key")
+        code, out = self._run("prefixbug", server, **env)
+        self.assertEqual(code, 0, out)
+        self.assertIn("NOT_RUN        prefix_sibling", out)
+        code, out = self._run("prefixbug", server, ST_TOKEN_SIBLING="tok-ali", **env)
+        self.assertEqual(code, 1, out)
+        self.assertIn("LEAK           prefix_sibling", out)
+        self.assertNotIn("tok-", out)
+
+    def test_custom_paths_reach_the_tool(self):
+        code, out = self._run("leaky", ST_STORE_PATH="/nope", ST_QUERY_PATH="/query")
+        self.assertEqual(code, 0, out)
+        self.assertIn("could not store", out)
+        code, out = self._run("leaky", ST_STORE_PATH="/nope", ST_FAIL_ON="inconclusive")
+        self.assertEqual(code, 1, out)
+
+    def test_chat_mode_grades(self):
+        server = {"auth": "token"}
+        code, out = self._run("leaky", server, ST_CACHE_MODE="chat", ST_MODEL="m1")
+        self.assertEqual(code, 1, out)
+        code, out = self._run("safe", server, ST_CACHE_MODE="chat",
+                              ST_CHAT_PATH="/chat/completions")
+        self.assertEqual(code, 0, out)
+        code, out = self._run("broken", server, ST_CACHE_MODE="chat")
+        self.assertEqual(code, 0, out)
+        self.assertIn("INCONCLUSIVE", out)
+        self.assertIn("::warning::", out)
+
+    def test_chat_mode_user_field_shared_key_and_hit_header(self):
+        server = {"auth": "user", "api_key": "shared-key-123456", "hit_header": "x-gw-cache",
+                  "fresh_id_on_hit": True}
+        env = dict(ST_TOKEN_A="", ST_TOKEN_B="", ST_CACHE_MODE="chat",
+                   ST_API_KEY="shared-key-123456", ST_USER_A="alice", ST_USER_B="bob",
+                   ST_CACHE_HIT_HEADER="x-gw-cache")
+        code, out = self._run("prefixbug", server, **env)
+        self.assertEqual(code, 0, out)
+        code, out = self._run("prefixbug", server, ST_USER_SIBLING="ali", **env)
+        self.assertEqual(code, 1, out)
+        self.assertIn("x-gw-cache header reported a cache hit", out)
+        self.assertNotIn("shared-key-123456", out)
+
+    def test_bad_option_is_bad_input(self):
+        code, out = self._run("safe", ST_CACHE_MODE="graphql")
+        self.assertEqual(code, 3, out)
+        code, out = self._run("safe", ST_USER_A="alice")      # user field needs chat mode
+        self.assertEqual(code, 3, out)
+
+
 if __name__ == "__main__":
     unittest.main()

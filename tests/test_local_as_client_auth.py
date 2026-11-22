@@ -258,5 +258,65 @@ class LocalASClientAuthTests(unittest.TestCase):
             srv.shutdown(); srv.server_close()
 
 
+@unittest.skipIf(local_as.jwt is None, "needs pyjwt[crypto] + cryptography")
+class LocalASStrictActorTests(unittest.TestCase):
+    """--actor-check strict: the actor token's audience must be this login
+    server and its subject must be the client that authenticated the exchange."""
+
+    CREDS = {"client_id": "agent-client", "client_secret": "s"}
+    STRICT = dict(clients={"agent-client": "s", "other-agent": "t"}, client_auth="strict",
+                  actor_check="strict")
+
+    def ex(self, as_, actor_sub, actor_aud, creds=None):
+        user = as_.issue_user_token("alice")
+        actor = as_.issue_client_token(actor_sub, audience=actor_aud)
+        params = {"grant_type": GRANT, "subject_token": user, "audience": TARGET,
+                  "actor_token": actor, **(creds if creds is not None else self.CREDS)}
+        try:
+            out = as_.token_exchange(params)
+        except ValueError as exc:
+            return None, str(exc), as_.exchanges[-1]
+        return as_.validate(out["access_token"], audience=TARGET), None, as_.exchanges[-1]
+
+    def test_matching_actor_with_own_audience_is_granted(self):
+        as_ = local_as.LocalAS(**self.STRICT)
+        claims, err, rec = self.ex(as_, "agent-client", as_.issuer)
+        self.assertIsNone(err)
+        self.assertEqual(claims["act"], {"sub": "agent-client"})
+        self.assertIn("bound to authenticated client", rec["actor_check"])
+
+    def test_another_clients_actor_is_refused(self):
+        as_ = local_as.LocalAS(**self.STRICT)
+        claims, err, rec = self.ex(as_, "other-agent", as_.issuer)
+        self.assertIsNone(claims)
+        self.assertIn("invalid_grant", err)
+        self.assertIn("not the client", rec["actor_check"])
+
+    def test_actor_for_another_audience_is_refused(self):
+        as_ = local_as.LocalAS(**self.STRICT)
+        claims, err, rec = self.ex(as_, "agent-client", "https://other-service.test")
+        self.assertIsNone(claims)
+        self.assertIn("audience", rec["actor_check"])
+
+    def test_actor_without_audience_is_refused(self):
+        as_ = local_as.LocalAS(**self.STRICT)
+        claims, _, rec = self.ex(as_, "agent-client", None)
+        self.assertIsNone(claims)
+        self.assertIn("audience", rec["actor_check"])
+
+    def test_basic_mode_is_unchanged(self):
+        as_ = local_as.LocalAS(clients={"agent-client": "s"})
+        claims, err, rec = self.ex(as_, "other-agent", "https://other-service.test", creds={})
+        self.assertIsNone(err)
+        self.assertEqual(claims["act"], {"sub": "other-agent"})
+        self.assertEqual(rec["actor_check"], "signature+issuer+expiry (audience not checked)")
+
+    def test_strict_needs_clients_and_a_known_mode(self):
+        with self.assertRaises(ValueError):
+            local_as.LocalAS(actor_check="strict")
+        with self.assertRaises(ValueError):
+            local_as.LocalAS(clients={"agent-client": "s"}, actor_check="paranoid")
+
+
 if __name__ == "__main__":
     unittest.main()

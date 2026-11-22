@@ -16,13 +16,17 @@ LangGraph server with the same code:
     PUT  /store/items                     {"namespace": [...], "key": k, "value": {...}}
     GET  /store/items?namespace=a.b&key=k
     POST /store/items/search              {"namespace_prefix": [...]}
-    POST /store/namespaces                {}
+    POST /store/namespaces                {"prefix": [...]}
+    PATCH  /threads/{id}                  {"metadata": {...}}
+    DELETE /threads/{id}
+    DELETE /store/items                   {"namespace": [...], "key": k}
 
 The one bundled "agent" (assistant id ``memory``) takes
 ``{"action": "save", "key": k, "value": v}`` or ``{"action": "recall", "key": k}``.
 
 Callers authenticate with ``Authorization: Bearer tok-<name>``; the identity is
-``<name>``. Modes:
+``<name>``, percent-decoded, so that a test id can hold a character a header
+cannot carry at its edge (``tok-alice%20`` is the id ``"alice "``). Modes:
 
 * ``leaky``  -- authenticates callers but authorizes nothing: any user can read
   any thread or Store item, and the agent keeps one shared memory namespace.
@@ -37,6 +41,25 @@ Callers authenticate with ``Authorization: Bearer tok-<name>``; the identity is
   Store matches a namespace prefix as a *string*, not segment by segment (the
   shape of CVE-2026-71433). A user whose id is a string prefix of another user's
   id sees that user's items in their own-namespace search.
+* ``dotbug`` -- like ``safe``, but the Store keeps a namespace as dot-joined
+  text, so a label that contains ``.`` addresses another namespace: the id
+  ``alice.notes`` reaches ``("alice", "notes")``.
+* ``separatorbug`` -- the same, for a Store that flattens namespaces on ``/``,
+  ``:`` or ``|``.
+* ``wildcardbug`` -- like ``safe``, but a Store search treats ``%``, ``_`` and
+  ``*`` in the prefix as wildcards (an unescaped SQL ``LIKE`` / glob).
+* ``casebug`` -- like ``safe``, but the Store compares labels without regard to
+  letter case.
+* ``whitespacebug`` -- like ``safe``, but the Store trims whitespace from labels.
+* ``strictids`` -- like ``safe``, and the Store refuses (422) a label that is
+  empty, contains ``.`` or has whitespace at either end. An awkward id of that
+  shape cannot use the Store at all, so its case is not exercised.
+* ``writeleak`` -- reads are scoped like ``safe``, but updates and deletes are
+  not checked: any user can change or delete another user's thread or item.
+* ``writeack`` -- like ``safe``, but a write to someone else's data is answered
+  with success and silently dropped.
+* ``nowrites`` -- like ``safe``, but nobody can update or delete anything (405),
+  so the write paths' own controls fail.
 
 NEVER expose this on a network. It stores unauthenticated data by design.
 
@@ -50,10 +73,13 @@ import os
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import re
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-MODES = ("leaky", "safe", "meta", "open", "broken", "prefixbug")
+MODES = ("leaky", "safe", "meta", "open", "broken", "prefixbug", "dotbug", "separatorbug",
+         "wildcardbug", "casebug", "whitespacebug", "strictids", "writeleak", "writeack",
+         "nowrites")
 FORBIDDEN_PORTS = {4000, 4444, 8790}
 ASSISTANT_ID = "memory"
 
@@ -87,11 +113,33 @@ class AgentMemoryState:
         token = token[len("Bearer "):] if token.startswith("Bearer ") else ""
         if not token.startswith("tok-") or len(token) <= 4:
             raise _HTTPError(401, "unknown token")
-        return token[4:]
+        return unquote(token[4:])
 
     @property
     def _owner_scoped(self) -> bool:
-        return self.mode in ("safe", "meta", "broken", "prefixbug")
+        return self.mode not in ("leaky", "open")
+
+    def _canon(self, namespace: Tuple[str, ...]) -> Tuple[str, ...]:
+        """The namespace as this mode's Store keys it (the bug modes fold ids together)."""
+        if self.mode == "dotbug":
+            return tuple(part for label in namespace for part in label.split("."))
+        if self.mode == "separatorbug":
+            return tuple(part for label in namespace for part in re.split(r"[/:|]", label))
+        if self.mode == "casebug":
+            return tuple(label.lower() for label in namespace)
+        if self.mode == "whitespacebug":
+            return tuple(label.strip() for label in namespace)
+        return tuple(namespace)
+
+    def _write_guard(self, allowed: bool) -> bool:
+        """True when a write may go ahead; False when it must be silently dropped."""
+        if self.mode == "nowrites":
+            raise _HTTPError(405, "Method Not Allowed")
+        if allowed or self.mode == "writeleak":
+            return True
+        if self.mode == "writeack":
+            return False
+        raise _HTTPError(404, "Not Found")
 
     # -- threads ----------------------------------------------------------
 
@@ -126,6 +174,26 @@ class AgentMemoryState:
             return []
         return [{"values": dict(v), "next": [], "tasks": []} for v in reversed(thread["history"])]
 
+    def _thread_for_write(self, user: str, thread_id: str) -> Optional[Dict[str, Any]]:
+        thread = self.threads.get(thread_id)
+        if thread is None:
+            raise _HTTPError(404, f"Thread with ID {thread_id} not found")
+        owned = not self._owner_scoped or thread["owner"] == user
+        return thread if self._write_guard(owned) else None
+
+    def update_thread(self, user: str, thread_id: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        thread = self._thread_for_write(user, thread_id)
+        if thread is None:
+            return {"thread_id": thread_id, "metadata": {}, "status": "idle"}
+        with self._lock:
+            thread["metadata"].update(metadata)
+        return self._thread_view(thread)
+
+    def delete_thread(self, user: str, thread_id: str) -> None:
+        if self._thread_for_write(user, thread_id) is not None:
+            with self._lock:
+                self.threads.pop(thread_id, None)
+
     def search_threads(self, user: str) -> List[Dict[str, Any]]:
         with self._lock:
             threads = list(self.threads.values())
@@ -140,6 +208,7 @@ class AgentMemoryState:
             raise _HTTPError(404, "Thread or assistant not found.")
         state = dict(body.get("input") or {})
         namespace = ("memories",) if self.mode in ("leaky", "open") else (user, "memories")
+        namespace = self._canon(namespace)
         key = str(state.get("key"))
         if state.get("action") == "save":
             with self._lock:
@@ -156,42 +225,72 @@ class AgentMemoryState:
 
     # -- the Store --------------------------------------------------------
 
+    def _owns(self, user: str, namespace: Tuple[str, ...]) -> bool:
+        return not self._owner_scoped or (bool(namespace) and namespace[0] == user)
+
     def _check_namespace(self, user: str, namespace: Tuple[str, ...]) -> None:
-        if self._owner_scoped and (not namespace or namespace[0] != user):
+        if self.mode == "strictids":
+            for label in namespace:
+                if not label or "." in label or label != label.strip():
+                    raise _HTTPError(422, "namespace label not accepted")
+        if not self._owns(user, namespace):
             raise _HTTPError(403, "not your namespace")
 
     def put_item(self, user: str, namespace: Tuple[str, ...], key: str, value: Dict[str, Any]) -> None:
-        self._check_namespace(user, namespace)
+        if self._owns(user, namespace) or self.mode not in ("writeleak", "writeack"):
+            self._check_namespace(user, namespace)
+        elif self.mode == "writeack":
+            return
         with self._lock:
-            self.items[(namespace, key)] = dict(value)
+            self.items[(self._canon(namespace), key)] = dict(value)
+
+    def delete_item(self, user: str, namespace: Tuple[str, ...], key: str) -> None:
+        if self._write_guard(self._owns(user, namespace)):
+            with self._lock:
+                self.items.pop((self._canon(namespace), key), None)
 
     def get_item(self, user: str, namespace: Tuple[str, ...], key: str) -> Dict[str, Any]:
         self._check_namespace(user, namespace)
-        item = self.items.get((namespace, key))
+        item = self.items.get((self._canon(namespace), key))
         if item is None or self.mode == "broken":
             raise _HTTPError(404, "Item not found")
         return {"namespace": list(namespace), "key": key, "value": dict(item)}
+
+    def _matcher(self, prefix: Tuple[str, ...]):
+        prefix = self._canon(prefix)
+        if self.mode == "prefixbug":
+            def matches(ns):  # string match on the dotted form: crosses segment boundaries
+                return ".".join(ns).startswith(".".join(prefix))
+        elif self.mode == "wildcardbug":
+            patterns = [re.compile("".join(".*" if ch in "%*" else "." if ch == "_" else re.escape(ch)
+                                           for ch in label) + r"\Z", re.S) for label in prefix]
+
+            def matches(ns):  # each label of the prefix is used as a pattern
+                return len(ns) >= len(patterns) and all(
+                    pattern.match(label) for pattern, label in zip(patterns, ns))
+        else:
+            def matches(ns):  # segment-by-segment match
+                return ns[:len(prefix)] == prefix
+        return matches
 
     def search_items(self, user: str, prefix: Tuple[str, ...]) -> Dict[str, Any]:
         self._check_namespace(user, prefix)
         if self.mode == "broken":
             return {"items": []}
-        if self.mode == "prefixbug":
-            def matches(ns):  # string match on the dotted form: crosses segment boundaries
-                return ".".join(ns).startswith(".".join(prefix))
-        else:
-            def matches(ns):  # segment-by-segment match
-                return ns[:len(prefix)] == prefix
+        matches = self._matcher(prefix)
         with self._lock:
             found = [{"namespace": list(ns), "key": key, "value": dict(value)}
                      for (ns, key), value in self.items.items() if matches(ns)]
         return {"items": found}
 
-    def list_namespaces(self, user: str) -> Dict[str, Any]:
+    def list_namespaces(self, user: str, prefix: Tuple[str, ...] = ()) -> Dict[str, Any]:
         with self._lock:
             names = sorted({ns for ns, _ in self.items})
-        if self.mode in ("safe", "broken", "prefixbug"):
+        if self._owner_scoped and self.mode != "meta":
             names = [ns for ns in names if ns and ns[0] == user]
+        if prefix:
+            matches = self._matcher(prefix)
+            names = [ns for ns in names if matches(ns)]
         return {"namespaces": [list(ns) for ns in names]}
 
 
@@ -228,7 +327,7 @@ def _make_handler(state: AgentMemoryState):
             url = urlparse(self.path)
             parts = [p for p in url.path.split("/") if p]
             try:
-                body = self._body() if method in ("POST", "PUT") else {}
+                body = self._body() if method in ("POST", "PUT", "PATCH", "DELETE") else {}
                 if method == "GET" and parts == ["ok"]:
                     return self._send(200, {"ok": True})
                 user = state.identify(self.headers.get("Authorization"))
@@ -251,6 +350,11 @@ def _make_handler(state: AgentMemoryState):
                 return self._send(200, state.get_state(user, rest[0]))
             if method == "GET" and len(rest) == 2 and rest[1] == "history":
                 return self._send(200, state.get_history(user, rest[0]))
+            if method == "PATCH" and len(rest) == 1:
+                return self._send(200, state.update_thread(user, rest[0], body.get("metadata") or {}))
+            if method == "DELETE" and len(rest) == 1:
+                state.delete_thread(user, rest[0])
+                return self._send(204)
             if method == "POST" and len(rest) == 3 and rest[1:] == ["runs", "wait"]:
                 return self._send(200, state.run(user, rest[0], body))
             raise _HTTPError(404, "Not Found")
@@ -265,8 +369,11 @@ def _make_handler(state: AgentMemoryState):
                 return self._send(200, state.get_item(user, namespace, (query.get("key") or [""])[0]))
             if method == "POST" and rest == ["items", "search"]:
                 return self._send(200, state.search_items(user, tuple(body.get("namespace_prefix") or ())))
+            if method == "DELETE" and rest == ["items"]:
+                state.delete_item(user, tuple(body.get("namespace") or ()), str(body.get("key")))
+                return self._send(204)
             if method == "POST" and rest == ["namespaces"]:
-                return self._send(200, state.list_namespaces(user))
+                return self._send(200, state.list_namespaces(user, tuple(body.get("prefix") or ())))
             raise _HTTPError(404, "Not Found")
 
         def do_GET(self):
@@ -277,6 +384,12 @@ def _make_handler(state: AgentMemoryState):
 
         def do_PUT(self):
             self._dispatch("PUT")
+
+        def do_PATCH(self):
+            self._dispatch("PATCH")
+
+        def do_DELETE(self):
+            self._dispatch("DELETE")
 
     return Handler
 

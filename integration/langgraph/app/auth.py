@@ -1,7 +1,11 @@
 """Sample auth for a local LangGraph dev server. Three fixed test users.
 
 ``ali`` exists so that two ids are string-prefix siblings (``ali`` / ``alice``),
-which the Store namespace-boundary check needs.
+which the Store namespace-boundary check needs. ``EDGE_TOKENS`` are more test
+users whose ids are awkward relatives of ``alice`` (a ``.`` or another separator
+inside the id, a wildcard character, letter case, whitespace), for the probe's
+awkward-id cases. They are ordinary users: each has its own token and may only
+touch namespaces that start with its own id.
 
 ST_SPIKE_MODE=leaky : authenticates callers but adds NO resource authorization
                       (the framework default when no @auth.on handler exists).
@@ -13,6 +17,19 @@ from langgraph_sdk import Auth
 
 MODE = os.environ.get("ST_SPIKE_MODE", "leaky")
 TOKENS = {"tok-alice": "alice", "tok-bob": "bob", "tok-ali": "ali"}
+EDGE_TOKENS = {
+    # dot: against alice's namespace ("alice", "notes"), and the pair acme / acme.alice
+    "tok-dot": "alice.notes", "tok-dot-sibling": "alice.no",
+    "tok-acme": "acme", "tok-acme-alice": "acme.alice",
+    # separator: the same two shapes with ":", "/" and "|"
+    "tok-sep-colon": "alice:notes", "tok-sep-slash": "alice/notes", "tok-sep-pipe": "alice|notes",
+    "tok-team": "team", "tok-team-alice": "team:alice",
+    # wildcard, case, whitespace
+    "tok-wild-underscore": "al_ce", "tok-wild-percent": "al%", "tok-wild-star": "al*",
+    "tok-case": "Alice",
+    "tok-space-after": "alice ", "tok-space-before": " alice",
+}
+TOKENS.update(EDGE_TOKENS)
 
 auth = Auth()
 

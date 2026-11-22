@@ -52,8 +52,9 @@ alone:
 | `store_search_all` | search the whole Store with no namespace |
 
 These are reported `NOT_RUN`, because they need more input from you (section 4):
-`thread_state`, `thread_history`, `agent_recall` and `store_search_own_prefix`.
-The last line of the output names the flags that would turn them on.
+`thread_state`, `thread_history`, `agent_recall`, `store_search_own_prefix`, the
+awkward-id cases (`store_edge_...`) and the four write paths. The last line of
+the output names the flags that would turn them on.
 
 If your app limits each user to their own part of the Store, also pass a
 namespace user A is allowed to write to, with dots between the parts:
@@ -156,17 +157,104 @@ stranger-test confirm agent-memory http://127.0.0.1:2024 --token-a tok-alice --t
   --whoami-field whoami
 ```
 
-- `--namespace-b` is B's own Store namespace, and it only does something when
-  the two users' ids are *prefix siblings*: B's id is the beginning of A's id,
-  such as `ali` and `alice` (`--namespace-a alice.notes --namespace-b ali`).
+A namespace option is labels joined by dots (`alice.notes`). If a label itself
+contains a dot, write the namespace as a JSON list instead:
+`--namespace-a '["acme.alice", "notes"]'`.
 
-That last path, `store_search_own_prefix`, catches a store that compares
+### Awkward-id pairs (`--edge-identity`)
+
+Code that scopes data per user often compares ids loosely: as text instead of
+part by part, without regard to case, or inside a SQL `LIKE`. Two users whose
+ids are *almost* the same can then reach each other's data even though the
+app's own checks are correct. To test this you provision an extra test user
+whose id is an awkward relative of A's, and tell the test about it:
+
+```bash
+--edge-identity KIND=TOKEN@NAMESPACE      # repeatable
+```
+
+`TOKEN` is that user's bearer token and `NAMESPACE` is that user's own Store
+namespace: one label taken exactly as written (it is not split on dots), or a
+JSON list of labels. The extra user then searches and reads **its own**
+namespace, and must not get A's marker.
+
+| `KIND` | Path in the report | The extra user's id, for A = `alice` with `--namespace-a alice.notes` |
+|---|---|---|
+| `prefix` | `store_search_own_prefix` | the beginning of A's id: `ali` |
+| `dot` | `store_edge_dot` | meets A's namespace at a `.`: `alice.notes`, `alice.no` (or A is `acme.alice` and the extra user is `acme`) |
+| `separator` | `store_edge_separator` | the same with `/`, `:` or `|`: `alice:notes` (or A is `team:alice` and the extra user is `team`) |
+| `wildcard` | `store_edge_wildcard` | holds `%`, `_` or `*`: `al_ce`, `al%`, `al*` |
+| `case` | `store_edge_case` | differs only in letter case: `Alice` |
+| `whitespace` | `store_edge_whitespace` | differs only in surrounding whitespace: `"alice "` |
+
+For example:
+
+```bash
+stranger-test confirm agent-memory http://127.0.0.1:2024 --token-a tok-alice --token-b tok-bob \
+  --namespace-a alice.notes \
+  --edge-identity prefix=tok-ali@ali \
+  --edge-identity case=tok-case@Alice \
+  --edge-identity wildcard=tok-wild-underscore@al_ce
+```
+
+Rules the test keeps:
+
+- It never makes up an identity and never tries to get around authentication.
+  It uses only the tokens you give it, through the same documented API calls as
+  every other path. You can give several identities of one kind; they share one
+  line in the report.
+- A kind you gave no identity for is `NOT_RUN`. So is an identity whose
+  namespace does not have the relationship its kind names.
+- Each extra user has its own positive control: it must be able to store an
+  item in its own namespace and read it back. If it cannot, for example because
+  the server refuses ids of that shape, the case is `NOT_EXERCISED`, not `OK`.
+  (A current LangGraph server refuses a Store label that contains a dot, so the
+  `dot` case comes back `NOT_EXERCISED` there: such a user cannot use the Store
+  at all, and nothing was shown either way.)
+- The report names an extra user only by its kind and a token fingerprint. Its
+  id is never printed.
+
+`--namespace-b` still works as before and is the `prefix` case run with B's own
+token: it does something when B's id is the beginning of A's id, such as `ali`
+and `alice` (`--namespace-a alice.notes --namespace-b ali`).
+
+The `prefix` path catches a store that compares
 namespaces as plain text rather than part by part, so that B's search of `ali`
 also returns items under `alice`. This is the shape of the store
 namespace-boundary bugs that were fixed in `langgraph-checkpoint-sqlite` and
 `langgraph-checkpoint-postgres` 3.1.1 to 3.1.3 (CVE-2026-71433 and
 CVE-2026-115883); they were found by other researchers and are fixed and
 public.
+
+### Write paths (`--write-paths`)
+
+The read paths ask whether B can see A's data. These ask whether B can change
+it, by naming it directly:
+
+| Path | What B tries |
+|---|---|
+| `thread_update` | update the metadata of A's thread, by its id |
+| `store_put_overwrite` | put an item at A's namespace and key |
+| `thread_delete` | delete A's thread, by its id |
+| `store_delete` | delete A's item, by namespace and key |
+
+**They are off by default**, because they send real update and delete calls to
+your server. Without `--write-paths` they are listed as `NOT_RUN` and no such
+call is made. With it:
+
+- Every attempt aims at a fresh thread or item that this run created for that
+  one attempt. Nothing else is named. The two deletes run last.
+- First A does the same kind of write to an object of her own. If that does not
+  work, the path is `NOT_EXERCISED`.
+- After B's attempt, A reads her object again. That re-read decides the result:
+  unchanged and B refused is `OK`; changed or gone is `LEAK` (the note says
+  "write crossed identities"); B's call answered with success but A's data
+  unchanged is `OBSERVATION`.
+- No write is attempted against a server that does not authenticate callers.
+
+The demo (`--demo`) runs with the write paths on. Use a development server: on
+a server that fails this check, the throwaway objects really are changed or
+deleted.
 
 ## 5. Reading the result
 
@@ -185,12 +273,24 @@ Then one line per path:
 
 | Outcome | Meaning |
 |---|---|
-| `LEAK` | B got A's marker this way. |
-| `OK` | A could read her own marker this way and B could not. |
-| `NOT_EXERCISED` | A could not read her own marker this way, so the path proves nothing. It never counts as `OK`. |
+| `LEAK` | B (or an extra identity) got A's marker this way, or B's write changed A's data. |
+| `OK` | The positive control held and the attempt failed: A could read her own marker this way and B could not; or the extra identity could use its own namespace and did not get A's item; or A could do the write herself, B was refused and A's data is unchanged. |
+| `OBSERVATION` | Write paths only: the server answered B's write with success, but A's data did not change. |
+| `NOT_EXERCISED` | A positive control did not hold, so the path proves nothing. It never counts as `OK`. |
 | `NOT_RUN` | The path was skipped because it needs an option you did not give. |
 
 An `OK` grade only covers the paths marked `OK`. Check how many there were.
+
+What `OK` does and does not mean for the newer paths:
+
+- An `OK` awkward-id case means that *this* extra user, with *this* id, did not
+  get A's item by searching or reading its own namespace. It says nothing about
+  other id shapes, and nothing about a kind that was `NOT_RUN` or
+  `NOT_EXERCISED`.
+- An `OK` write path means B's call was refused and A's object was still intact
+  when A read it back. It covers thread metadata and Store items addressed by
+  id. It does not cover other write routes (runs on A's thread, state updates,
+  bulk operations).
 
 Add `--json` for the full report. Tokens and markers appear only as short
 `sha256:` fingerprints, never in clear.
@@ -203,5 +303,8 @@ Add `--json` for the full report. Tokens and markers appear only as short
 - There is no semantic-search leak test yet.
 - Only test servers you run or are authorized to test. Anything that is not on
   localhost is refused unless you pass `--allow-nonloopback`.
+- The awkward-id cases only cover the Store, and only the id shapes you supply
+  test users for.
 - The test creates a few threads and Store items tagged `st-probe-...` and does
-  not delete them. Use a development server.
+  not delete them (each extra identity adds one item in its own namespace;
+  `--write-paths` adds a few more threads and items). Use a development server.

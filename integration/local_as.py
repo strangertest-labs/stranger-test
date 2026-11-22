@@ -52,6 +52,13 @@ credentials and NO actor_token, the issued token gets ``act: {"sub": client_id}`
 -- the actor is the authenticated gateway. Recorded per exchange as
 ``act_source`` (``actor_token`` / ``client_auth`` / None).
 
+``actor_check`` (default ``basic``): what this AS verifies on an actor_token.
+``basic`` checks its signature, issuer and expiry only (not its audience).
+``strict`` also requires its audience to be this AS's issuer AND its subject to
+be the client that authenticated the exchange request (needs valid client
+credentials on the request). A refusal is ``invalid_grant``. Recorded per
+exchange as ``actor_check``.
+
 Needs pyjwt[crypto] to run. Run ``python integration/local_as.py`` for a
 self-test, or ``python integration/local_as.py serve --port N`` to serve.
 """
@@ -152,6 +159,7 @@ def select_subject_key(
 
 
 CLIENT_AUTH_MODES = ("none", "optional", "strict")
+ACTOR_CHECK_MODES = ("basic", "strict")
 
 
 class ClientAuthError(ValueError):
@@ -241,9 +249,14 @@ class LocalAS:
                  lax_subject_issuer: bool = False,
                  clients: Optional[Dict[str, str]] = None,
                  client_auth: str = "none",
-                 act_from_client: bool = False):
+                 act_from_client: bool = False,
+                 actor_check: str = "basic"):
         if client_auth not in CLIENT_AUTH_MODES:
             raise ValueError(f"client_auth must be one of {CLIENT_AUTH_MODES}")
+        if actor_check not in ACTOR_CHECK_MODES:
+            raise ValueError(f"actor_check must be one of {ACTOR_CHECK_MODES}")
+        if actor_check == "strict" and not clients:
+            raise ValueError("actor_check strict needs registered clients")
         if client_auth != "none" and not clients:
             raise ValueError("client_auth optional/strict needs registered clients")
         if act_from_client and not clients:
@@ -251,6 +264,7 @@ class LocalAS:
         self.clients: Dict[str, str] = dict(clients or {})
         self.client_auth = client_auth
         self.act_from_client = act_from_client
+        self.actor_check = actor_check
         self.issuer = issuer
         self.ttl = ttl
         self.lax_subject_issuer = lax_subject_issuer
@@ -444,10 +458,24 @@ class LocalAS:
                 except Exception as exc:
                     rec["actor_check"] = f"refused: {type(exc).__name__}"
                     raise ValueError(f"invalid_grant: actor_token {type(exc).__name__}") from exc
-                # What this AS checks on an actor token: its own signature, its
-                # own issuer, expiry. NOT the audience (recorded per exchange).
-                rec.update(actor_check="signature+issuer+expiry (audience not checked)",
-                           actor_sub=actor.get("sub"), actor_aud=actor.get("aud"))
+                rec.update(actor_sub=actor.get("sub"), actor_aud=actor.get("aud"))
+                if self.actor_check == "strict":
+                    aud = actor.get("aud")
+                    auds = aud if isinstance(aud, list) else [aud]
+                    if self.issuer not in auds:
+                        rec["actor_check"] = "refused: audience is not this login server"
+                        raise ValueError("invalid_grant: actor_token audience is not this server")
+                    if valid is not True or actor.get("sub") != client_id:
+                        rec["actor_check"] = ("refused: actor is not the client that "
+                                              "authenticated the exchange")
+                        raise ValueError("invalid_grant: actor_token not issued to the "
+                                         "authenticated client")
+                    rec["actor_check"] = ("signature+issuer+expiry+audience+"
+                                          "bound to authenticated client")
+                else:
+                    # basic: its own signature, its own issuer, expiry. NOT the
+                    # audience, NOT the requesting client (recorded per exchange).
+                    rec["actor_check"] = "signature+issuer+expiry (audience not checked)"
                 act = {"sub": actor.get("sub")}
                 # Preserve any delegation chain the subject already carried.
                 if isinstance(subject.get("act"), dict):
@@ -576,6 +604,7 @@ class LocalAS:
                         "x_lax_subject_issuer": as_.lax_subject_issuer,
                         "x_client_auth": as_.client_auth,
                         "x_act_from_client": as_.act_from_client,
+                        "x_actor_check": as_.actor_check,
                         "x_clients": sorted(as_.clients),  # ids only, never secrets
                         "x_providers": as_.providers,
                         "x_scope_cap": "requested ∩ subject; subject's scope if none requested",
@@ -701,6 +730,9 @@ def _serve_main(argv: List[str]) -> None:
     ap.add_argument("--client-auth", choices=CLIENT_AUTH_MODES, default="none")
     ap.add_argument("--act-from-client", action="store_true",
                     help="valid client credentials and no actor_token -> act={sub: client_id}")
+    ap.add_argument("--actor-check", choices=ACTOR_CHECK_MODES, default="basic",
+                    help="strict: actor_token audience must be this AS and its subject "
+                         "must be the client that authenticated the exchange")
     a = ap.parse_args(argv)
     if a.port in FORBIDDEN_PORTS:
         raise SystemExit(f"ERROR: refusing reserved port {a.port}")
@@ -711,10 +743,12 @@ def _serve_main(argv: List[str]) -> None:
             raise SystemExit(f"ERROR: --client wants ID:SECRET, got {cid!r}:...")
         clients[cid] = sec
     as_ = LocalAS(issuer=a.issuer, key_path=a.key_path, lax_subject_issuer=a.lax_subject_issuer,
-                  clients=clients, client_auth=a.client_auth, act_from_client=a.act_from_client)
+                  clients=clients, client_auth=a.client_auth, act_from_client=a.act_from_client,
+                  actor_check=a.actor_check)
     srv = as_.serve(port=a.port)
     print(f"local_as on 127.0.0.1:{a.port} lax_subject_issuer={a.lax_subject_issuer} "
           f"client_auth={a.client_auth} act_from_client={a.act_from_client} "
+          f"actor_check={a.actor_check} "
           f"clients={sorted(clients)}", flush=True)
     srv.serve_forever()
 

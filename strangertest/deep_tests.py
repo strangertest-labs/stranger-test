@@ -39,6 +39,9 @@ def _free_port() -> int:
         if port in FORBIDDEN_PORTS:
             continue
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Like the servers themselves: a port whose last listener just closed is
+        # free again. A port something is still listening on stays refused.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", port))
             return port
@@ -251,23 +254,54 @@ _PRACTICE_AGENT = {
 }
 
 
+# Extra practice identities for the awkward-id cases, each with its own token.
+# The practice server reads the id from the token (percent-decoded).
+_PRACTICE_EDGES = {
+    "prefix": ("ali",),
+    "dot": ("alice.notes", "alice.no"),
+    "separator": ("alice:notes", "alice/notes", "alice|notes"),
+    "wildcard": ("al_ce", "al%", "al*"),
+    "case": ("Alice",),
+    "whitespace": ("alice ", " alice"),
+}
+_PRACTICE_EDGE_BUGS = (("prefix", "prefixbug"), ("dot", "dotbug"), ("separator", "separatorbug"),
+                       ("wildcard", "wildcardbug"), ("case", "casebug"),
+                       ("whitespace", "whitespacebug"))
+
+
+def _practice_edge_identities(*kinds: str) -> list:
+    from urllib.parse import quote
+    return [{"kind": kind, "token": "tok-" + quote(name, safe=""), "namespace": [name]}
+            for kind in (kinds or tuple(_PRACTICE_EDGES)) for name in _PRACTICE_EDGES[kind]]
+
+
 def _demo_agent_memory() -> Dict[str, Any]:
     from .agent_memory import run_agent_memory_probe
     from .practice_agent_memory_http import build_server
 
-    out = {}
-    for mode in ("leaky", "safe"):
+    def run(mode, token_b="tok-bob", **options):
         with _serve(build_server(mode, port=_free_port())) as mcp_url:
             base = mcp_url[: -len("/mcp")]      # this API lives at the server root
-            out[mode] = run_agent_memory_probe(
-                base, "tok-alice", "tok-bob", namespace_a=["alice", "notes"],
-                authorized=True, **_PRACTICE_AGENT)
+            return run_agent_memory_probe(base, "tok-alice", token_b,
+                                          namespace_a=["alice", "notes"], authorized=True, **options)
+
+    out = {"leaky": run("leaky", write_paths=True, **_PRACTICE_AGENT),
+           # The safe server gets everything at once: every awkward-id identity and
+           # the write paths. All of it must come back clean.
+           "safe": run("safe", write_paths=True, edge_identities=_practice_edge_identities(),
+                       **_PRACTICE_AGENT)}
     # The namespace-boundary shape needs prefix-sibling ids: B is "ali", A is "alice".
-    with _serve(build_server("prefixbug", port=_free_port())) as mcp_url:
-        out["prefixbug"] = run_agent_memory_probe(
-            mcp_url[: -len("/mcp")], "tok-alice", "tok-ali",
-            namespace_a=["alice", "notes"], namespace_b=["ali"], authorized=True)
+    out["prefixbug"] = run("prefixbug", token_b="tok-ali", namespace_b=["ali"])
+    for kind, mode in _PRACTICE_EDGE_BUGS[1:]:
+        out[mode] = run(mode, edge_identities=_practice_edge_identities(kind))
+    out["writeleak"] = run("writeleak", write_paths=True)
     return out
+
+
+_AGENT_MEMORY_DEMO_EXTRA = tuple(
+    (mode, f"a store with the {kind} id bug (the test must catch it)", "LEAK")
+    for kind, mode in _PRACTICE_EDGE_BUGS) + (
+    ("writeleak", "a server that checks reads but not writes (the test must catch it)", "LEAK"),)
 
 
 def _json_opt(value: Any, name: str) -> Any:
@@ -282,22 +316,19 @@ def _json_opt(value: Any, name: str) -> Any:
 
 
 def _target_agent_memory(url: str, token_a: str, token_b: str, **opts) -> Any:
-    from .agent_memory import run_agent_memory_probe
-    def split(value):
-        return [p for p in value.split(".") if p] if isinstance(value, str) else value
+    from .agent_memory import parse_edge_identity, parse_namespace, run_agent_memory_probe
     return run_agent_memory_probe(
-        url, token_a, token_b, namespace_a=split(opts.get("namespace_a")),
-        namespace_b=split(opts.get("namespace_b")),
+        url, token_a, token_b, namespace_a=parse_namespace(opts.get("namespace_a")),
+        namespace_b=parse_namespace(opts.get("namespace_b")),
         assistant_id=opts.get("assistant_id"),
         save_input=_json_opt(opts.get("save_input"), "save-input"),
         recall_input=_json_opt(opts.get("recall_input"), "recall-input"),
         whoami_field=opts.get("whoami_field"),
+        edge_identities=[parse_edge_identity(spec) if isinstance(spec, str) else spec
+                         for spec in opts.get("edge_identities") or ()],
+        write_paths=bool(opts.get("write_paths")),
         authorized=True, authorization_note="operator-confirmed target")
 
-
-# --------------------------------------------------------------------------- #
-# The registry.                                                               #
-# --------------------------------------------------------------------------- #
 
 @dataclass
 class DeepTest:
@@ -308,6 +339,74 @@ class DeepTest:
     demo: Callable[[], Dict[str, Any]]
     run_target: Optional[Callable[..., Any]] = None   # None = lab-only (use demo)
     target_note: str = ""
+    # More demo runs beyond "leaky" and "safe": (key in demo()'s result, what the
+    # fixture is, the grade the test must give it).
+    demo_extra: tuple = ()
+
+
+def _demo_semantic_cache() -> Dict[str, Any]:
+    from .semantic_cache import run_semantic_cache_probe
+    from .practice_semantic_cache_http import build_server
+
+    out = {}
+    for mode in ("leaky", "safe"):
+        with _serve(build_server(mode, port=_free_port())) as url:
+            out[mode] = run_semantic_cache_probe(
+                url[: -len("/mcp")], "alice", "bob", authorized=True)
+    # Prefix-sibling ids (ali is a prefix of alice) against a string-prefix cache.
+    with _serve(build_server("prefixbug", port=_free_port())) as url:
+        out["prefixbug"] = run_semantic_cache_probe(
+            url[: -len("/mcp")], "alice", "ali", authorized=True)
+    # The chat-completions shape: a stand-in LLM gateway with a response cache,
+    # two bearer tokens. "broken" never serves from cache, so nothing can be told.
+    for mode in ("leaky", "safe", "broken"):
+        with _serve(build_server(mode, port=_free_port(), auth="token")) as url:
+            out["chat_" + mode] = run_semantic_cache_probe(
+                url[: -len("/mcp")], "tok-alice", "tok-bob", mode="chat", authorized=True)
+    # Awkward ids: header ids made from A's (edge_cases), one cache per key bug.
+    for key, mode in (("edges_safe", "safe"), ("dotbug", "dotbug"),
+                      ("separatorbug", "separatorbug"), ("wildcardbug", "wildcardbug"),
+                      ("casebug", "casebug")):
+        with _serve(build_server(mode, port=_free_port())) as url:
+            out[key] = run_semantic_cache_probe(
+                url[: -len("/mcp")], "alice", "bob", edge_cases="all", authorized=True)
+    # A space cannot travel in a header id, so that case uses given credentials.
+    with _serve(build_server("whitespacebug", port=_free_port(), auth="token")) as url:
+        out["whitespacebug"] = run_semantic_cache_probe(
+            url[: -len("/mcp")], "tok-alice", "tok-bob", mode="chat", authorized=True,
+            edge_identity=["whitespace=tok-space", "case=tok-case"])
+    # Three routes in one run, then the same over event streams.
+    routes = ["chat", "responses", "messages"]
+    for key, mode, stream in (("routes_routebug", "routebug", False),
+                              ("routes_safe", "safe", False),
+                              ("stream_routebug", "routebug", True),
+                              ("stream_safe", "safe", True)):
+        with _serve(build_server(mode, port=_free_port(), auth="token")) as url:
+            out[key] = run_semantic_cache_probe(
+                url[: -len("/mcp")], "tok-alice", "tok-bob", mode="chat", route=routes,
+                stream=stream, authorized=True)
+    return out
+
+
+_SEMANTIC_CACHE_OPTIONS = (
+    "base_query", "reworded_query", "identity_as", "identity_header", "token_header",
+    "api_key", "user_a", "user_b", "user_sibling", "store_path", "query_path",
+    "chat_path", "model", "cache_hit_header", "edge_cases", "edge_identity", "edge_user",
+    "route", "stream")
+
+
+def _target_semantic_cache(url: str, token_a: str, token_b: str, **opts) -> Any:
+    from .semantic_cache import run_semantic_cache_probe
+    threshold = opts.get("threshold")
+    try:
+        threshold = float(threshold) if threshold is not None else None
+    except (TypeError, ValueError):
+        raise ValueError("--threshold must be a number")
+    return run_semantic_cache_probe(
+        url, token_a, token_b, threshold=threshold, mode=opts.get("cache_mode"),
+        sibling=opts.get("token_sibling"),
+        authorized=True, authorization_note="operator-confirmed target",
+        **{name: opts.get(name) for name in _SEMANTIC_CACHE_OPTIONS})
 
 
 DEEP_TESTS: Dict[str, DeepTest] = {
@@ -347,7 +446,34 @@ DEEP_TESTS: Dict[str, DeepTest] = {
         "Identity A saves a marker in an agent server's memory; can identity B read it "
         "back from A's thread, from the Store, or by asking the agent? Speaks the "
         "LangGraph Server API; give the server's base URL, not an MCP endpoint.",
-        tier1_check=None, demo=_demo_agent_memory, run_target=_target_agent_memory),
+        tier1_check=None, demo=_demo_agent_memory, run_target=_target_agent_memory,
+        demo_extra=_AGENT_MEMORY_DEMO_EXTRA),
+    "semantic-cache": DeepTest(
+        "semantic-cache", "Semantic cache cross-user leak",
+        "Identity A caches an answer; can identity B read it back from the cache by the "
+        "same question, a reworded (near-match) question, or (with a prefix-sibling id) "
+        "B's own scope? For response/LLM caches and LLM gateways that cache "
+        "chat completions (--cache-mode chat); give the base URL.",
+        tier1_check=None, demo=_demo_semantic_cache, run_target=_target_semantic_cache,
+        demo_extra=(
+            ("chat_leaky", "a KNOWN-LEAKY gateway cache, chat-completions shape "
+                           "(the test must catch it)", "LEAK"),
+            ("chat_safe", "a SAFE gateway cache, chat-completions shape "
+                          "(must come back clean)", "OK"),
+            ("chat_broken", "a gateway that never serves from cache "
+                            "(the test must say it cannot tell)", "INCONCLUSIVE"),
+            ("edges_safe", "a SAFE cache, every awkward-id case (--edge-cases all)", "OK"),
+            ("dotbug", "a cache that compares ids up to the first dot", "LEAK"),
+            ("separatorbug", "a cache that joins id and question with ':'", "LEAK"),
+            ("wildcardbug", "a cache that uses the caller's id as a pattern", "LEAK"),
+            ("casebug", "a cache that ignores letter case in ids", "LEAK"),
+            ("whitespacebug", "a gateway cache that trims ids, identities given by token "
+                              "(--edge-identity)", "LEAK"),
+            ("routes_routebug", "a gateway that applies identity on chat-completions only, "
+                                "three routes (--route)", "LEAK"),
+            ("routes_safe", "a SAFE gateway cache, three routes", "OK"),
+            ("stream_routebug", "the same route bug over event streams (--stream)", "LEAK"),
+            ("stream_safe", "a SAFE gateway cache over event streams", "OK"))),
 }
 
 # Scanner Tier-1 check_id -> the Tier-2 test that confirms it.

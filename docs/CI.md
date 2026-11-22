@@ -76,6 +76,42 @@ To also test through the agent, add your graph's id and inputs:
 `{marker}` is replaced by the test's own marker. See
 [AGENT-MEMORY.md](AGENT-MEMORY.md) for every option and how to read the result.
 
+## 4. Semantic cache (response caches and LLM gateways)
+
+`semantic-cache` checks a response cache: can one user get an answer that was
+cached for another? Give the cache's or gateway's base URL. For an LLM gateway
+that caches chat completions, with one API key per test user:
+
+```yaml
+- uses: strangertest-labs/stranger-test@v0.3
+  with:
+    mode: confirm
+    test: semantic-cache
+    cache-mode: chat
+    url: http://127.0.0.1:4000
+    token-a: ${{ secrets.GATEWAY_TEST_KEY_A }}
+    token-b: ${{ secrets.GATEWAY_TEST_KEY_B }}
+    model: my-model
+```
+
+For a cache with its own store and query calls that tells tenants apart by a
+header:
+
+```yaml
+- uses: strangertest-labs/stranger-test@v0.3
+  with:
+    mode: confirm
+    test: semantic-cache
+    url: http://127.0.0.1:8081
+    token-a: tenant-one
+    token-b: tenant-two
+    identity-header: x-tenant-id
+```
+
+In chat mode the test sends about eight short chat requests through the
+gateway, so point the gateway at a mock or a cheap model. See
+[CACHE.md](CACHE.md) for every option and how to read the result.
+
 ## What fails the step
 
 | Result | `fail-on: leak` (default) | `fail-on: inconclusive` | `fail-on: never` |
@@ -96,13 +132,22 @@ The tool's own exit code is available as the step output `exit-code`.
 
 | Input | Default | Meaning |
 |---|---|---|
-| `url` | (required) | The MCP endpoint to test. For `agent-memory`, the agent server's base URL. |
+| `url` | (required) | The MCP endpoint to test. For `agent-memory` and `semantic-cache`, the server's base URL. |
 | `mode` | `scan` | `scan` or `confirm`. |
-| `test` | | `confirm` only: `state-handle`, `tasks-idor`, `elicitation` or `agent-memory`. |
-| `token-a`, `token-b` | | `confirm` only: the two users' bearer tokens. |
+| `test` | | `confirm` only: `state-handle`, `tasks-idor`, `elicitation`, `agent-memory` or `semantic-cache`. |
+| `token-a`, `token-b` | | `confirm` only: the two users' bearer tokens. For `semantic-cache`, the two users' ids or tokens (see `identity-as`). |
 | `namespace-a`, `namespace-b` | | `agent-memory` only: Store namespaces, dotted. `namespace-b` with prefix-sibling ids also checks the namespace boundary. |
 | `assistant`, `save-input`, `recall-input` | | `agent-memory` only: graph id and JSON run inputs for the through-the-agent paths. |
 | `whoami-field` | | `agent-memory` only: run-output field that carries the caller's identity. |
+| `cache-mode` | `store` | `semantic-cache` only: `store` (a cache with store and query calls) or `chat` (a gateway that caches chat completions). |
+| `identity-as` | | `semantic-cache` only: send `token-a`/`token-b` in a `header` or as a `bearer` token. Default: `header` in store mode, `bearer` in chat mode. |
+| `identity-header`, `token-header` | `x-identity`, `Authorization` | `semantic-cache` only: the header names. A token header other than `Authorization` gets the raw value. |
+| `token-sibling`, `user-sibling` | | `semantic-cache` only: a third user whose id is the beginning of user A's id, for the prefix-sibling path. |
+| `api-key` | | `semantic-cache` only: one credential sent with every request. |
+| `user-a`, `user-b` | | `semantic-cache` chat mode: values for the OpenAI `user` body field. |
+| `store-path`, `query-path`, `chat-path` | `/store`, `/query`, `/v1/chat/completions` | `semantic-cache` only: request paths. |
+| `model`, `cache-hit-header` | `gpt-4o-mini`, | `semantic-cache` chat mode: model to request, and a response header that tells a cache hit. |
+| `base-query`, `reworded-query`, `threshold` | | `semantic-cache` only: the question pair, and (store mode) a similarity threshold. |
 | `bearer` | | `scan` only: scan as an authenticated caller. |
 | `sarif-file` | | `scan` only: also write SARIF 2.1.0 here. |
 | `allow-nonloopback` | `false` | Permit a target that is not on loopback. Only for a server you are authorized to test. |

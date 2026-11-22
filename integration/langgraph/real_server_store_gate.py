@@ -3,15 +3,26 @@
 Starts ``langgraph dev`` on 127.0.0.1 with the sample app in safe mode (owner
 filter for threads, own-namespace check for the Store) and with the server's
 Store replaced by LangGraph's own SQLite or Postgres store (``app/store.py``,
-via ``app/langgraph.store.json``). The two identities are prefix siblings,
-``alice`` and ``ali``. Nothing in the path is a stand-in: requests go through
-the LangGraph server, its auth handlers and the real store.
+via ``app/langgraph.store.json``). Nothing in the path is a stand-in: requests
+go through the LangGraph server, its auth handlers and the real store.
+
+Three probe runs against the one server:
+
+- ``main``: A is ``alice`` (namespace ``alice.notes``), B is ``bob``, with every
+  awkward-id test user from ``app/auth.py`` (``ali`` for the prefix case, and
+  the dot, separator, wildcard, case and whitespace users) and the write paths
+  turned on.
+- ``dot-parent``: A is ``acme.alice`` and the extra identity is ``acme``.
+- ``separator-parent``: A is ``team:alice`` and the extra identity is ``team``.
 
 Run it once per installed store version, each in its own environment that has
 both the dev server and the store:
 
     pip install "langgraph-cli[inmem]" "langgraph-checkpoint-sqlite==3.1.0"   -> expect LEAK
     pip install "langgraph-cli[inmem]" "langgraph-checkpoint-sqlite==3.1.1"   -> expect OK
+
+(that expectation is for the prefix case, ``store_search_own_prefix``; read the
+other lines for what the installed versions did with the other cases)
 
     LANGGRAPH_BIN=<env>/bin/langgraph ST_GATE_SCRATCH=<dir> ST_GATE_PORT=4645 \
         python3 integration/langgraph/real_server_store_gate.py
@@ -41,6 +52,33 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 from strangertest.agent_memory import run_agent_memory_probe  # noqa: E402
 
 FORBIDDEN_PORTS = {4000, 4444, 8790}
+AGENT = dict(assistant_id="memory",
+             save_input={"action": "save", "key": "st-probe", "value": "{marker}"},
+             recall_input={"action": "recall", "key": "st-probe"}, whoami_field="whoami")
+
+
+def _edge(kind, token, user_id):
+    return {"kind": kind, "token": token, "namespace": [user_id]}
+
+
+MAIN_EDGES = [
+    _edge("prefix", "tok-ali", "ali"),
+    _edge("dot", "tok-dot", "alice.notes"), _edge("dot", "tok-dot-sibling", "alice.no"),
+    _edge("separator", "tok-sep-colon", "alice:notes"),
+    _edge("separator", "tok-sep-slash", "alice/notes"),
+    _edge("separator", "tok-sep-pipe", "alice|notes"),
+    _edge("wildcard", "tok-wild-underscore", "al_ce"), _edge("wildcard", "tok-wild-percent", "al%"),
+    _edge("wildcard", "tok-wild-star", "al*"),
+    _edge("case", "tok-case", "Alice"),
+    _edge("whitespace", "tok-space-after", "alice "), _edge("whitespace", "tok-space-before", " alice"),
+]
+# (name, A's token, A's namespace, extra identities, write paths on)
+RUNS = (
+    ("main", "tok-alice", ["alice", "notes"], MAIN_EDGES, True),
+    ("dot-parent", "tok-acme-alice", ["acme.alice"], [_edge("dot", "tok-acme", "acme")], False),
+    ("separator-parent", "tok-team-alice", ["team:alice"],
+     [_edge("separator", "tok-team", "team")], False),
+)
 
 
 def _ready(base):
@@ -128,13 +166,11 @@ def main():
         else:
             print("could not run: the server never became ready", file=sys.stderr)
             return 2
-        report = run_agent_memory_probe(
-            base, "tok-alice", "tok-ali",
-            namespace_a=["alice"], namespace_b=["ali"],
-            assistant_id="memory",
-            save_input={"action": "save", "key": "st-probe", "value": "{marker}"},
-            recall_input={"action": "recall", "key": "st-probe"},
-            whoami_field="whoami", authorized=True)
+        reports = {}
+        for name, token_a, namespace_a, edges, writes in RUNS:
+            reports[name] = run_agent_memory_probe(
+                base, token_a, "tok-bob", namespace_a=namespace_a, edge_identities=edges,
+                write_paths=writes, authorized=True, **(AGENT if name == "main" else {}))
     finally:
         try:
             os.killpg(proc.pid, signal.SIGTERM)
@@ -149,18 +185,21 @@ def main():
 
     with open(log.name) as handle:
         used_custom_store = "Using custom store" in handle.read()
-    out = report.to_dict()
+    out = reports["main"].to_dict()
     out.update({"target": f"langgraph dev (safe sample app, {kind} store)",
                 "store_kind": kind, "store_version": store_version, "langgraph_version": langgraph_version,
                 "langgraph_api_version": api_version,
-                "server_log_confirms_custom_store": used_custom_store})
+                "server_log_confirms_custom_store": used_custom_store,
+                "other_runs": {name: reports[name].to_dict() for name in reports if name != "main"}})
     with open(os.path.join(scratch, f"server-store-{tag}.json"), "w") as handle:
         json.dump(out, handle, indent=2)
     print(f"langgraph {langgraph_version}, langgraph-api {api_version}, "
           f"{package} {store_version}; custom store in use: {used_custom_store}")
-    print(f"grade: {out['grade']} - {out['detail']}")
-    for path in out["paths"]:
-        print(f"    {path['outcome']:<14} {path['name']}")
+    for name, report in reports.items():
+        print(f"[{name}] grade: {report.grade} - {report.detail}")
+        for path in report.paths:
+            if name == "main" or path["outcome"] != "NOT_RUN":
+                print(f"    {path['outcome']:<14} {path['name']}  ({path.get('note', '')})")
     if not used_custom_store:
         print(f"WARNING: the server log does not show the {kind} store in use; "
               "this run says nothing about that store.", file=sys.stderr)

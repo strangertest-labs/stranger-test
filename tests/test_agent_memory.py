@@ -11,7 +11,7 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
 from strangertest import deep_tests as dt
 from strangertest.agent_memory import (
-    INCONCLUSIVE, LEAK, OBSERVATION, OK, run_agent_memory_probe,
+    EDGE_PATHS, INCONCLUSIVE, LEAK, OBSERVATION, OK, WRITE_PATHS, run_agent_memory_probe,
 )
 from strangertest.cli import main
 from strangertest.guard import AuthorizationError
@@ -51,8 +51,11 @@ class Grades(unittest.TestCase):
         self.assertTrue(report.leaked)
         got = outcomes(report)
         self.assertEqual(got.pop("store_search_own_prefix"), "NOT_RUN")  # no namespace_b given
+        # No extra identity and no --write-paths: those are listed, never run.
+        for name in list(EDGE_PATHS.values())[1:] + list(WRITE_PATHS):
+            self.assertEqual(got.pop(name), "NOT_RUN")
         self.assertEqual(set(got.values()), {"LEAK"}, report.summary())
-        self.assertEqual(len(report.paths), 9)
+        self.assertEqual(len(report.paths), 18)
 
     def test_safe_server_is_ok(self):
         report = probe("safe")
@@ -61,7 +64,8 @@ class Grades(unittest.TestCase):
         # A safe server refuses an un-namespaced search even from A, so that one
         # path cannot be exercised; every other path is exercised and clean.
         self.assertEqual(got.pop("store_search_all"), "NOT_EXERCISED")
-        self.assertEqual(got.pop("store_search_own_prefix"), "NOT_RUN")
+        for name in list(EDGE_PATHS.values()) + list(WRITE_PATHS):
+            self.assertEqual(got.pop(name), "NOT_RUN")
         self.assertEqual(set(got.values()), {"OK"}, report.summary())
         self.assertTrue(report.controls["auth_enforced"])
         self.assertTrue(report.controls["a_agent_recall_sees_marker"])
@@ -167,7 +171,8 @@ class Hint(unittest.TestCase):
         report = probe("leaky", **self.TWO_TOKENS)
         hint = report.hint()
         self.assertEqual(len(hint.splitlines()), 1, hint)
-        for flag in ("--assistant", "--save-input", "--recall-input", "--namespace-b"):
+        for flag in ("--assistant", "--save-input", "--recall-input", "--namespace-b",
+                     "--edge-identity", "--write-paths"):
             self.assertIn(flag, hint)
         self.assertIn("docs/AGENT-MEMORY.md", hint)
 
@@ -183,7 +188,9 @@ class Hint(unittest.TestCase):
         with serving("prefixbug") as url:
             report = run_agent_memory_probe(
                 url, A, "tok-ali", namespace_a=["alice", "notes"], namespace_b=["ali"],
-                authorized=True, **AGENT)
+                edge_identities=dt._practice_edge_identities("dot", "separator", "wildcard",
+                                                             "case", "whitespace"),
+                write_paths=True, authorized=True, **AGENT)
         self.assertNotIn("NOT_RUN", outcomes(report).values(), report.summary())
         self.assertEqual(report.hint(), "")
 

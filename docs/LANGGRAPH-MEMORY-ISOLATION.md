@@ -45,6 +45,13 @@ fixed version.
 3. User B tries each path: A's thread by id, thread search, the Store item by
    namespace and key, Store search, and (if you supply your agent's inputs)
    asking the agent.
+4. Optionally, extra test users whose ids are awkward relatives of A's (a
+   string prefix, a `.` or another separator inside the id, a wildcard
+   character, letter case, whitespace) each search and read their own
+   namespace, and must not get A's item.
+5. Optionally (`--write-paths`), user B tries to update or delete A's thread and
+   to overwrite or delete A's Store item, on throwaway objects made for the
+   purpose; A then reads them back.
 
 It grades `LEAK`, `OK` or `INCONCLUSIVE`. A server with no authentication is
 reported as an `OBSERVATION`, because the two callers are then the same user.
@@ -74,7 +81,43 @@ item, and `ali` searches his own namespace.
 | `langgraph-checkpoint-postgres` | `LEAK`: same | `OK` |
 
 Every other exercised path was `OK` on every run, because the app's own
-checks blocked them. Reproduce with
+checks blocked them.
+
+### Awkward-id cases and write paths, by SQLite store version
+
+The same server and sample app (handlers on), with A = `alice`, B = `bob`, the
+extra test users in `integration/langgraph/app/auth.py`, and the write paths
+on. Run on 2026-11-22 with LangGraph 1.2.24 and langgraph-api 0.18.3 / 0.18.4;
+only `langgraph-checkpoint-sqlite` changes.
+
+| Case or path | 3.1.0 | 3.1.1 | 3.1.2 | 3.1.3 |
+|---|---|---|---|---|
+| `prefix` (`ali`) | `LEAK` | `OK` | `OK` | `OK` |
+| `wildcard` (`al_ce`, `al%`, `al*`) | `LEAK` (`al_ce` and `al%`; `al*` was `OK`) | `OK` | `OK` | `OK` |
+| `case` (`Alice`) | `LEAK` | `OK` | `OK` | `OK` |
+| `separator`, sibling form (`alice:notes`, `alice/notes`, `alice\|notes`) | `OK` | `OK` | `OK` | `OK` |
+| `separator`, parent form (A = `team:alice`, other = `team`) | `LEAK` | `OK` | `OK` | `OK` |
+| `whitespace` (`"alice "`, `" alice"`) | `OK` | `OK` | `OK` | `OK` |
+| `dot` (`alice.notes`, `alice.no`; and A = `acme.alice`, other = `acme`) | not exercised | not exercised | not exercised | not exercised |
+| `thread_update`, `thread_delete`, `store_put_overwrite`, `store_delete` | `OK` | `OK` | `OK` | `OK` |
+
+Reading it:
+
+- The 3.1.0 leaks are all the one bug fixed in 3.1.1 (CVE-2026-71433). That
+  store matched a namespace prefix with SQL `LIKE`, which is also
+  case-insensitive and treats `_` and `%` as wildcards, so a user named
+  `al_ce`, `al%` or `Alice` got `alice`'s items from their own search. `team`
+  reaching `team:alice` is the prefix case again: `:` is not special to the
+  store.
+- The `dot` case could not be exercised through the server on any version. The
+  server's HTTP layer refuses a Store label that contains a dot (HTTP 422), so a
+  user whose id has a dot cannot use the Store at all and the test reports
+  `NOT_EXERCISED`, not `OK`. The same happened with the server packages as they
+  were before the 3.1.2 store release (langgraph-api 0.15.1). At the library
+  level the bug is real and fixed: `integration/langgraph/cve_2026_115883_store.py`
+  shows a dotted label reaching another namespace on 3.1.1 and being refused on
+  3.1.2.
+- The write paths were refused by the sample app's handlers on every version. Reproduce with
 `integration/langgraph/real_server_store_gate.py` (through the server),
 `integration/langgraph/real_store_gate.py` (the store behind a minimal app), and
 `integration/langgraph/cve_2026_71433_store.py` (the library alone).
@@ -89,7 +132,8 @@ checks blocked them. Reproduce with
 
 - The check covers what it can reach over the server's HTTP API. A clean result
   is not a proof of isolation.
-- The store-boundary path needs two test accounts whose ids are prefix siblings.
+- The store-boundary path needs two test accounts whose ids are prefix siblings,
+  and each awkward-id case needs a test account with an id of that shape.
 - It does not test leaks through semantic (similarity) search.
 - It was run against LangGraph's local dev server with the SQLite and Postgres
   stores, not against LangGraph's hosted or self-hosted platform.

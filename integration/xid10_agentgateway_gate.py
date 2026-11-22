@@ -571,7 +571,8 @@ def login_server_facts():
     """The local AS's client-authentication mode (absent on an older local_as)."""
     oc = _get(f"{AS_BASE}/.well-known/openid-configuration")
     return {"client_auth": oc.get("x_client_auth"), "act_from_client": oc.get("x_act_from_client"),
-            "clients": oc.get("x_clients"), "lax_subject_issuer": oc.get("x_lax_subject_issuer")}
+            "clients": oc.get("x_clients"), "lax_subject_issuer": oc.get("x_lax_subject_issuer"),
+            "actor_check": oc.get("x_actor_check", "basic")}
 
 
 def ident_tok(label, token_fn):

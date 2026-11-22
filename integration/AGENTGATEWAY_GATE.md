@@ -161,8 +161,14 @@ jwt.rawToken.unredacted()`); `audiences` and `scopes` narrow the exchange.
   any valid `agent-client` token can present itself as that agent. This is
   most likely intended — the authorization server issuing the actor token is
   expected to bind it to the real caller — so it is a question to put to the
-  agentgateway maintainers, **not** a bug we report. We have not run a
-  "lying caller" test against it for that reason.
+  agentgateway maintainers, **not** a bug we report. The "lying caller" runs
+  (`xid10_deeper_agentgateway.py`, `DEEPER_MODE=actor_lies`,
+  `actor_lies_may_act` and `actor_lies_strict`) record what happens as
+  observations; see `RESULTS.md`. `actor_lies_strict` uses
+  `agentgateway/xid10-actor-strict.yaml` (the gateway authenticates itself on
+  the exchange with `clientAuth`) and needs `local_as.py serve` started with
+  `--client-auth strict --actor-check strict` and both `--client` entries; the
+  client secret must match the one in that config file.
 - **The gateway writes to its config file.** On startup agentgateway adds a
   generated `config.session.key` to the file it was given. The driver copies
   the config to a temp dir and runs it from there, so the repo file stays clean

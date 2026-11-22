@@ -82,7 +82,7 @@ stranger-test confirm state-handle --demo          # leaky -> LEAK, safe -> OK
 stranger-test confirm state-handle http://127.0.0.1:4600/mcp --token-a <A> --token-b <B>
 ```
 
-The dynamic cross-user tests (two identities, loopback, fingerprints only):
+The seven dynamic cross-user tests (two identities, loopback, fingerprints only):
 
 | Test | What it proves |
 |---|---|
@@ -92,6 +92,7 @@ The dynamic cross-user tests (two identities, loopback, fingerprints only):
 | `elicitation`     | A starts an elicitation, B completes the authorization — does the grant bind to A? (account takeover); plus secrets requested in form mode |
 | `subscriptions`   | B's `subscriptions/listen` stream receives notifications scoped to A |
 | `agent-memory`    | B reads what A saved in an agent server's memory — threads, long-term Store, or by asking the agent. Speaks the **LangGraph Server** API; give the server's base URL. With prefix-sibling ids it also catches the store namespace-boundary bugs (CVE-2026-71433 / -115883). |
+| `semantic-cache`  | B gets the answer a response cache stored for A — by the same question, a reworded one, or from a prefix-sibling id. For a cache with store/query calls, or an **LLM gateway that caches chat completions** (`--cache-mode chat`); give the base URL. |
 
 `agent-memory` needs only a running LangGraph server and two test users' tokens;
 nothing about your agent:
@@ -103,6 +104,15 @@ stranger-test confirm agent-memory http://127.0.0.1:2024 --token-a <A> --token-b
 Guide, with a copy-paste test-user auth snippet: [docs/AGENT-MEMORY.md](docs/AGENT-MEMORY.md).
 Background and results on affected and fixed store versions:
 [docs/LANGGRAPH-MEMORY-ISOLATION.md](docs/LANGGRAPH-MEMORY-ISOLATION.md).
+
+`semantic-cache` needs a running cache or gateway and two test users' ids or
+keys:
+
+```bash
+stranger-test confirm semantic-cache http://127.0.0.1:4000 --cache-mode chat --token-a <A> --token-b <B> --model <model>
+```
+
+Guide, for both kinds of cache: [docs/CACHE.md](docs/CACHE.md).
 
 Every `confirm` grade requires **provably distinct principals** before it will
 call anything a LEAK — on a server that collapses both callers to one identity
@@ -222,7 +232,41 @@ permitted the test. There is deliberately no "scan everything" mode: one target,
 one authorization. Any real finding is for **private, responsible disclosure**
 to the server's owner. Do not name-and-shame.
 
-## What's new in 0.3.2
+## What's new in 0.4.0
+
+- **`confirm semantic-cache`** — a seventh deep test, for **response caches**:
+  can identity B get the answer a cache stored for identity A, by the same
+  question, a reworded one, or from a prefix-sibling id? Bundled `--demo`.
+- **Works against real caches and gateways.** Choose how each identity is sent
+  (`--identity-header`, a bearer token or API key with `--identity-as bearer` /
+  `--token-header`, a shared `--api-key`, the OpenAI `user` field), set the
+  paths (`--store-path`, `--query-path`), and give a third identity for the
+  prefix-sibling path (`--token-sibling`).
+- **Chat mode for LLM gateways** (`--cache-mode chat`): no store call; A asks
+  through `POST /v1/chat/completions`, must get a cache hit on her repeat, and
+  then B asks. A hit is recognised by a cache-hit header when there is one,
+  else by the response body. See [docs/CACHE.md](docs/CACHE.md).
+- **Several API routes in one run.** `--route chat|responses|messages[=PATH]`
+  (repeatable) tests each route and adds a cross-route path: A fills the cache
+  on one route, B asks on another. `--stream` repeats the check with streamed
+  responses.
+- **Awkward identifiers.** `--edge-identity KIND=TOKEN[@NAMESPACE]` (and
+  `--edge-user` for caches) adds identities whose ids are close to A's: a
+  prefix, a dotted label, a separator, a wildcard character, a case variant, a
+  whitespace variant. Works with `agent-memory` and `semantic-cache`.
+- **Write paths for `agent-memory`** (`--write-paths`): can B update, overwrite
+  or delete what A stored? Off by default against real targets, because these
+  calls change data; on in `--demo`. See
+  [docs/AGENT-MEMORY.md](docs/AGENT-MEMORY.md).
+- **An evidence file per run.** `confirm ... --evidence FILE` (`.md` or `.json`)
+  writes one page: the system, the run times, the two identities as
+  fingerprints, the positive-control result, each path's outcome and the
+  verdict. An inconclusive run is stated as "not a pass". See
+  [docs/EVIDENCE.md](docs/EVIDENCE.md).
+- **The GitHub Action runs `semantic-cache`**, in both modes; see
+  [docs/CI.md](docs/CI.md).
+
+### 0.3.2
 
 - **The GitHub Action runs `agent-memory`.** New inputs `namespace-a`,
   `namespace-b`, `assistant`, `save-input`, `recall-input` and `whoami-field`;
@@ -245,7 +289,7 @@ to the server's owner. Do not name-and-shame.
 
 ### 0.3.0
 
-- **`confirm agent-memory`** — a sixth deep test, for **agent servers** rather
+- **`confirm agent-memory`** — a sixth deep test (of seven today), for **agent servers** rather
   than MCP servers: can identity B read what A saved in the agent's memory
   (LangGraph threads, long-term Store, or via the agent)? Bundled `--demo`, and
   a real-LangGraph gate in `integration/langgraph/`. Two tokens are enough to
@@ -258,7 +302,7 @@ to the server's owner. Do not name-and-shame.
 ### 0.2.0
 
 - **`scan`** (Tier 1) one-command read-only scanner, SARIF/JSON, CI exit codes.
-- **`confirm`** (Tier 2) five dynamic cross-user tests, each with a `--demo`.
+- **`confirm`** (Tier 2) five dynamic cross-user tests at the time (seven today), each with a `--demo`.
 - **Precision:** a `LEAK` needs provably distinct principals, else `OBSERVATION`.
 - **One exit-code scheme:** `0` OK, `1` LEAK/FAIL, `2` INCONCLUSIVE, `3` usage.
 

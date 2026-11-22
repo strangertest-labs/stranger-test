@@ -5,6 +5,9 @@ DEEPER_MODE:
   concurrent          many interleaved A and B calls at once (strangertest.concurrency)
   actor_lies          the caller supplies a lying actor token (observation only)
   actor_lies_may_act  the same, with agentgateway's opt-in actorToken.enforceMayAct
+  actor_lies_strict   the same, with the gateway authenticating itself on the
+                      exchange (clientAuth) and the login server in
+                      --actor-check strict (audience + bound to that client)
 
 Env (all ports 4600-4699, never 4000/4444/8790): AS_BASE, AGW_URL, AGW_ADMIN_PORT,
 UPSTREAM_PORT, FAULT_PORT (faulty token endpoint), FIXTURE_PORT (fixtures use
@@ -201,11 +204,14 @@ def classify_actor_case(*, reached, upstream_actor, expected_actor, exchange_rec
     return "inconclusive"
 
 
-def mode_actor_lies(up, gw, base, may_act):
+def mode_actor_lies(up, gw, base, may_act, strict=False):
     facts = base["login_server"]
     missing = {"agent-client", "other-agent"} - set(facts.get("clients") or [])
     if missing:
         raise SystemExit(f"actor_lies needs the AS started with --client for {sorted(missing)}")
+    if strict and (facts.get("actor_check") != "strict" or facts.get("client_auth") != "strict"):
+        raise SystemExit("actor_lies_strict needs the AS started with --client-auth strict "
+                         "--actor-check strict")
     claim = {"sub": g.ACTOR_CLIENT_ID} if may_act else None
     tool = discover(issue("al-discover", may_act=claim), issue_actor(g.ACTOR_CLIENT_ID,
                                                                      aud=g.AS_ISSUER))
@@ -246,12 +252,18 @@ def mode_actor_lies(up, gw, base, may_act):
         print(f"  {name}: {label}  (upstream actor={up_actor}, exchange="
               f"{(rec or {}).get('outcome')})")
     control_ok = results["control"]["observation"] == "forwarded_to_upstream"
-    name = "actor_lies-may_act" if may_act else "actor_lies"
+    name = ("actor_lies-strict_login_server" if strict else
+            "actor_lies-may_act" if may_act else "actor_lies")
     dc.save_run("agentgateway", name, {
         **base, "probe": "actor_lies", "grade": "OBSERVATION",
         "label": "actor_validation_observed" if control_ok else "inconclusive",
         "control_reached_upstream_with_actor": control_ok,
-        "note": ("Not graded: agentgateway may intend the login server to validate the actor "
+        "note": ("Not graded: agentgateway leaves validation of the actor token to the login "
+                 "server. Here the gateway authenticates itself on the exchange (clientAuth, "
+                 "client agent-client) and the local login server runs --actor-check strict: "
+                 "the actor token's audience must be the login server and its subject must be "
+                 "the client that authenticated the exchange.") if strict else
+                ("Not graded: agentgateway may intend the login server to validate the actor "
                  "token. The local login server checks an actor token's signature, issuer and "
                  "expiry, NOT its audience; so an arrival upstream in other_audience shows "
                  "only that neither agentgateway nor this login server checked it."),
@@ -264,7 +276,8 @@ def main():
     mode = os.environ.get("DEEPER_MODE", "")
     configs = {"login_faults": "xid10-login-faults.yaml", "concurrent": "xid10-delegation.yaml",
                "actor_lies": "xid10-delegation.yaml",
-               "actor_lies_may_act": "xid10-actor-may-act.yaml"}
+               "actor_lies_may_act": "xid10-actor-may-act.yaml",
+               "actor_lies_strict": "xid10-actor-strict.yaml"}
     if mode not in configs:
         raise SystemExit(f"DEEPER_MODE must be one of {sorted(configs)}")
     config_path = os.path.join(_HERE, "agentgateway", configs[mode])
@@ -284,7 +297,8 @@ def main():
         elif mode == "concurrent":
             mode_concurrent(up, gw, base)
         else:
-            mode_actor_lies(up, gw, base, may_act=(mode == "actor_lies_may_act"))
+            mode_actor_lies(up, gw, base, may_act=(mode == "actor_lies_may_act"),
+                            strict=(mode == "actor_lies_strict"))
     except Exception:
         print("--- agentgateway log tail (redacted) ---\n" + gw.tail(30))
         raise
