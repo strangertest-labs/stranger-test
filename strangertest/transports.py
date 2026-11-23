@@ -140,7 +140,19 @@ class StdioTransport(Transport):
 
 
 class HTTPTransportError(RuntimeError):
-    pass
+    """A failed HTTP exchange. ``status`` is the HTTP status when there was one."""
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
+
+
+# Protocol versions that use the ``initialize`` handshake over Streamable HTTP
+# and expect ``MCP-Protocol-Version`` on the requests that follow it.
+HANDSHAKE_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
+# Statuses with which a server refuses the handshake itself. 401 and 403 are
+# about the caller, not the handshake, and are never retried.
+_HANDSHAKE_REFUSED = (400, 404, 405, 406, 415, 422, 426, 501)
 
 
 class HTTPTransport(Transport):
@@ -187,6 +199,12 @@ class HTTPTransport(Transport):
         self._declared_version = declared_version
         self._client_info = client_info
         self._client_capabilities = client_capabilities if client_capabilities is not None else {}
+        # Set after a handshake that settled on a handshake-era version; sent
+        # as MCP-Protocol-Version on every later request, as those versions require.
+        self._handshake_version: Optional[str] = None
+        #: How the connection was opened: "modern" (asked for), "handshake",
+        #: "modern-after-refusal" or "handshake-<version>-after-refusal".
+        self.negotiation: Optional[str] = "modern" if modern else None
 
     def _headers(self) -> Dict[str, str]:
         headers = {
@@ -196,6 +214,8 @@ class HTTPTransport(Transport):
         headers.update(self._base_headers)
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
+        if self._handshake_version and not self._modern:
+            headers[MCP_PROTOCOL_VERSION_HEADER] = self._handshake_version
         return headers
 
     def _modern_meta(self) -> Dict[str, Any]:
@@ -248,34 +268,114 @@ class HTTPTransport(Transport):
                 return content_type, body
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:500]
-            raise HTTPTransportError(f"HTTP {exc.code} from {self._url}: {detail}")
+            raise HTTPTransportError(f"HTTP {exc.code} from {self._url}: {detail}", status=exc.code)
         except urllib.error.URLError as exc:
             raise HTTPTransportError(f"could not reach {self._url}: {exc.reason}")
+
+    def _modern_initialize_result(self, want: Any) -> Dict[str, Any]:
+        # The modern era has no initialize handshake: synthesize the result
+        # locally so the client's version/capabilities flow is unchanged,
+        # without a nonexistent round trip.
+        return {
+            "jsonrpc": "2.0",
+            "id": want,
+            "result": {
+                "protocolVersion": self._declared_version,
+                "capabilities": {},
+                "serverInfo": {"name": "modern", "version": "0"},
+            },
+        }
+
+    def _matching(self, want: Any, content_type: str, body: str) -> Optional[Dict[str, Any]]:
+        response: Optional[Dict[str, Any]] = None
+        for parsed in self._iter_messages(content_type, body):
+            if parsed.get("id") == want and ("result" in parsed or "error" in parsed):
+                response = parsed
+        return response
+
+    def _handshake(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Open a connection with ``initialize``, and settle on a way to talk
+        when the server refuses it.
+
+        A server that speaks only the 2026-07-28 per-request form has no
+        ``initialize`` and answers it with an HTTP 4xx or a JSON-RPC error. A
+        server that speaks only older versions may refuse the version we
+        offer. So, after a refusal: (1) ask ``tools/list`` in the modern form,
+        and if that is answered carry on in the modern form; (2) otherwise
+        offer each older handshake version in turn, with its
+        ``MCP-Protocol-Version`` header; (3) otherwise report the first
+        refusal unchanged. A 401 or 403 is about the caller and is not retried.
+        """
+        want = message.get("id")
+        refusal: Optional[HTTPTransportError] = None
+        response: Optional[Dict[str, Any]] = None
+        try:
+            response = self._matching(want, *self._post(message))
+        except HTTPTransportError as exc:
+            if exc.status not in _HANDSHAKE_REFUSED:
+                raise
+            refusal = exc
+        if response is not None and "result" in response:
+            self._note_handshake(response, "handshake")
+            return response
+        if refusal is None and response is None:
+            raise HTTPTransportError(f"no response matching id {want!r} from {self._url}")
+
+        # (1) the modern form, tried with a read-only request.
+        probe = {"jsonrpc": "2.0", "id": "st-negotiate", "method": "tools/list"}
+        try:
+            wrapped, extra = self._modern_envelope(probe)
+            answer = self._matching("st-negotiate", *self._post(wrapped, extra))
+        except (HTTPTransportError, ValueError):
+            answer = None
+        if answer is not None and "result" in answer:
+            self._modern = True
+            self._session_id = None
+            self.negotiation = "modern-after-refusal"
+            return self._modern_initialize_result(want)
+
+        # (2) an older handshake version.
+        for version in HANDSHAKE_VERSIONS:
+            older = dict(message)
+            older["params"] = dict(message.get("params") or {}, protocolVersion=version)
+            try:
+                answer = self._matching(
+                    want, *self._post(older, {MCP_PROTOCOL_VERSION_HEADER: version}))
+            except (HTTPTransportError, ValueError):
+                continue
+            if answer is not None and "result" in answer:
+                self._note_handshake(answer, f"handshake-{version}-after-refusal", offered=version)
+                return answer
+
+        # (3) nothing worked: the first refusal, as it was.
+        if refusal is not None:
+            raise refusal
+        return response  # the JSON-RPC error the server gave to initialize
+
+    def _note_handshake(self, response: Dict[str, Any], how: str,
+                        offered: Optional[str] = None) -> None:
+        result = response.get("result")
+        agreed = result.get("protocolVersion") if isinstance(result, dict) else None
+        if agreed in HANDSHAKE_VERSIONS:
+            self._handshake_version = agreed
+        elif offered is not None:
+            # The server took an older handshake but named a version that has
+            # none; the header carries the version the handshake was made with.
+            self._handshake_version = offered
+        self.negotiation = how
 
     def request(self, message: Dict[str, Any]) -> Dict[str, Any]:
         want = message.get("id")
         if self._modern:
             if message.get("method") == "initialize":
-                # The modern era has no initialize handshake: synthesize the
-                # result locally so the client's version/capabilities flow is
-                # unchanged, without a nonexistent round trip.
-                return {
-                    "jsonrpc": "2.0",
-                    "id": want,
-                    "result": {
-                        "protocolVersion": self._declared_version,
-                        "capabilities": {},
-                        "serverInfo": {"name": "modern", "version": "0"},
-                    },
-                }
+                return self._modern_initialize_result(want)
             wrapped, extra = self._modern_envelope(message)
             content_type, body = self._post(wrapped, extra)
+        elif message.get("method") == "initialize":
+            return self._handshake(message)
         else:
             content_type, body = self._post(message)
-        response: Optional[Dict[str, Any]] = None
-        for parsed in self._iter_messages(content_type, body):
-            if parsed.get("id") == want and ("result" in parsed or "error" in parsed):
-                response = parsed
+        response = self._matching(want, content_type, body)
         if response is None:
             raise HTTPTransportError(f"no response matching id {want!r} from {self._url}")
         return response

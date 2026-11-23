@@ -13,8 +13,34 @@ that a system meets any standard.
 
 ## 1. Produce one
 
-Run a `confirm` test against a system you are allowed to test, and save the
-result as JSON:
+The shortest way is one command. Add `--evidence` to a `confirm` run:
+
+```bash
+stranger-test confirm semantic-cache http://127.0.0.1:8080 \
+  --token-a <TOKEN_A> --token-b <TOKEN_B> \
+  --evidence evidence.md --evidence evidence.json \
+  --evidence-system "Answer cache" --evidence-system-version 4.2.1 \
+  --evidence-environment staging --evidence-operator "Platform QA" \
+  --evidence-identity-a "test account in tenant 1" \
+  --evidence-identity-b "test account in tenant 2"
+```
+
+- `--evidence FILE` writes the page. Give it twice to get Markdown and JSON from
+  the same run.
+- The raw result is saved beside the first file as `evidence.result.json`.
+- `--evidence-system`, `--evidence-system-version`, `--evidence-environment`,
+  `--evidence-operator` and `--evidence-notes` are your own words about the run.
+  A field you leave out is shown as "not stated by the operator".
+- `--evidence-identity-a` and `--evidence-identity-b` say in a few words which
+  test accounts were used, for example that one id is a prefix of the other.
+  Never put a credential there.
+- The page records the run's start and finish times and the command that was
+  run, with every credential replaced by a placeholder.
+- When it writes each file the tool prints its `sha256`. Record that value with
+  the files on the day of the run.
+
+You can also build the page later from a saved result. Run a `confirm` test and
+save the result as JSON:
 
 ```bash
 stranger-test confirm semantic-cache http://127.0.0.1:8080 \
@@ -33,9 +59,12 @@ Options:
 
 - `--format md|json` picks the format. The default is Markdown, or JSON when
   `--out` ends in `.json`. Without `--out` the page goes to standard output.
-- `--system-name`, `--system-version`, `--environment`, `--operator` and
-  `--notes` are your own words about the run. They are copied as you give them,
-  on one line. Do not put credentials in them.
+- `--system-name`, `--system-version`, `--environment`, `--operator`,
+  `--notes`, `--identity-a` and `--identity-b` are your own words about the
+  run. They are copied as you give them, on one line. Do not put credentials in
+  them.
+- A page built this way cannot know when the test ran or which options were
+  used, and says so.
 - `--digest` prints only the digest of the result file and stops.
 
 Keep `result.json` next to `evidence.md`. The page is a summary; the result
@@ -94,8 +123,10 @@ section 4.
 
 **Limits.** What the run did not test.
 
-**Reproduce.** The command to run the test again. Credentials appear as
-`<TOKEN_A>` and `<TOKEN_B>`.
+**Reproduce.** The command to run the test again. A page written by
+`confirm --evidence` shows the command that was run, with all its options;
+credentials appear as placeholders such as `<TOKEN_A>` and `<TOKEN_B>`. A page
+built later from a saved result shows the basic command only and says so.
 
 **Integrity.** A sha256 digest of the raw result. To check that a page belongs
 to a result file, run:
@@ -107,6 +138,11 @@ python3 -m strangertest.evidence result.json --digest
 and compare the output with the digest on the page. The digest is computed over
 the result's content (keys sorted, no extra spaces), so reformatting the JSON
 file does not change it, and changing any value does.
+
+The digest ties a page to one raw result. It does not protect the page itself,
+and neither file is signed: someone who can change both files can make them
+agree. So keep the page, the raw result and the `sha256` values the tool printed
+somewhere that records when they arrived, such as a ticket or an audit folder.
 
 ## 3. What it does and does not prove
 

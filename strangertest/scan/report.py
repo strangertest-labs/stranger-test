@@ -110,6 +110,10 @@ def _verdict_line(profile: Any, findings: Sequence[Any]) -> str:
         return "VERDICT: target unreachable — nothing could be observed."
     counts = _counts(findings)
     risk = counts.get("RISK", 0)
+    errors = field_of(profile, "errors", []) or []
+    if not risk and any(str(e).startswith("handshake refused") for e in errors):
+        return ("VERDICT: not examined. The server refused the MCP handshake, so its tools, "
+                "sessions and caches were not looked at. This is not a clean result.")
     if risk:
         return (
             f"VERDICT: {risk} risk signal{'s' if risk != 1 else ''} to review "

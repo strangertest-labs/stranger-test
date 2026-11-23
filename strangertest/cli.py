@@ -493,9 +493,21 @@ def cmd_confirm(args: argparse.Namespace) -> int:
     if getattr(args, "evidence", None):
         from .evidence import write_evidence
 
-        write_evidence(args.evidence, rep, run_started=run_started,
-                       run_finished=datetime.now(timezone.utc))
-        print("evidence written: %s" % args.evidence, file=sys.stderr)
+        try:
+            done = write_evidence(
+                args.evidence, rep, save_result=True, run_started=run_started,
+                run_finished=datetime.now(timezone.utc),
+                system_name=args.evidence_system, system_version=args.evidence_system_version,
+                environment=args.evidence_environment, operator=args.evidence_operator,
+                notes=args.evidence_notes, identity_a=args.evidence_identity_a,
+                identity_b=args.evidence_identity_b,
+                command=getattr(args, "_argv", None))
+        except (OSError, ValueError) as exc:
+            print(f"error: could not write the evidence file: {exc}", file=sys.stderr)
+            return 3
+        for item in done["written"]:
+            print("evidence written: %s  sha256:%s" % (item["path"], item["sha256"]),
+                  file=sys.stderr)
     hint = getattr(rep, "hint", None)
     if not args.json and callable(hint) and hint():
         print(hint())
@@ -631,8 +643,25 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument("--allow-nonloopback", dest="allow_nonloopback", action="store_true",
                          help="permit a non-loopback target (authorized testing only)")
     confirm.add_argument("--json", action="store_true", help="JSON output")
-    confirm.add_argument("--evidence", default=None, metavar="FILE",
-                         help="also write a one-page evidence file (.md or .json); see docs/EVIDENCE.md")
+    confirm.add_argument("--evidence", action="append", default=None, metavar="FILE",
+                         help="also write a one-page evidence file (.md or .json); repeat to "
+                              "write both from the same run. The raw result is saved beside "
+                              "it as FILE.result.json. See docs/EVIDENCE.md")
+    confirm.add_argument("--evidence-system", default=None, metavar="TEXT",
+                         help="evidence page: name of the system tested")
+    confirm.add_argument("--evidence-system-version", default=None, metavar="TEXT",
+                         help="evidence page: its version or build")
+    confirm.add_argument("--evidence-environment", default=None, metavar="TEXT",
+                         help="evidence page: for example 'staging'")
+    confirm.add_argument("--evidence-operator", default=None, metavar="TEXT",
+                         help="evidence page: who ran the test")
+    confirm.add_argument("--evidence-notes", default=None, metavar="TEXT",
+                         help="evidence page: one line of context")
+    confirm.add_argument("--evidence-identity-a", default=None, metavar="TEXT",
+                         help="evidence page: a few words describing test account A "
+                              "(never a credential)")
+    confirm.add_argument("--evidence-identity-b", default=None, metavar="TEXT",
+                         help="evidence page: a few words describing test account B")
     memory = confirm.add_argument_group(
         "agent-memory options",
         "For `confirm agent-memory <base-url>`. All optional: two tokens alone test the "
@@ -735,6 +764,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    args._argv = list(argv) if argv is not None else list(sys.argv[1:])
     func = getattr(args, "func", None)
     if func is None:
         parser.print_help(sys.stderr)

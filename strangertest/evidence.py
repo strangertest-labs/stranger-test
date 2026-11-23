@@ -52,7 +52,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import shlex
 import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -423,12 +425,15 @@ def canonical_digest(result: Any) -> str:
 # --------------------------------------------------------------------------- #
 
 def _path(name: str, what: str, grade: str, meaning: Optional[str] = None,
-          b_status: Any = None) -> Dict[str, Any]:
+          b_status: Any = None, a_status: Any = None) -> Dict[str, Any]:
     entry: Dict[str, Any] = {"name": name, "what": what, "grade": grade,
                              "meaning": meaning or _GRADE_MEANING[grade]}
     status = _status(b_status)
     if status is not None:
         entry["b_http_status"] = status
+    status = _status(a_status)
+    if status is not None:
+        entry["a_http_status"] = status
     return entry
 
 
@@ -454,9 +459,11 @@ def _named_paths(raw: Any, known: Dict[str, str]) -> List[Dict[str, Any]]:
             name, what = f"unrecognised_{unknown}", "A path this version does not describe"
         outcome = item.get("outcome")
         if outcome == "LEAK":
-            out.append(_path(name, what, LEAK, b_status=item.get("b_status")))
+            out.append(_path(name, what, LEAK, b_status=item.get("b_status"),
+                             a_status=item.get("control_status")))
         elif outcome == "OK":
-            out.append(_path(name, what, OK, b_status=item.get("b_status")))
+            out.append(_path(name, what, OK, b_status=item.get("b_status"),
+                             a_status=item.get("control_status")))
         elif outcome == "NOT_EXERCISED":
             out.append(_path(name, what, NOT_TESTED, _NO_BASELINE))
         elif outcome == "NOT_RUN":
@@ -565,7 +572,8 @@ def _positive_control(test: str, data: Dict[str, Any],
     }
 
 
-def _identities(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _identities(data: Dict[str, Any],
+                described: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     fps = data.get("fingerprints") if isinstance(data.get("fingerprints"), dict) else {}
     controls = data.get("controls") if isinstance(data.get("controls"), dict) else {}
     roles = {"A": "Owner of the test data. Plants a unique marker and reads it back.",
@@ -581,6 +589,7 @@ def _identities(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             "role": roles[label],
             "credential_fingerprint": credential,
             "principal_fingerprint": _fingerprint(controls.get(f"whoami_{low}")),
+            "described_as": _clean_text((described or {}).get(label)),
         })
     return out
 
@@ -593,6 +602,8 @@ def _verdict(grade: str, paths: Sequence[Dict[str, Any]], control_status: str) -
         tested = max(len(paths) - count[NOT_TESTED], 1)
         statement = (f"{_HEADLINES[code]}: identity B reached identity A's data on "
                      f"{max(count[LEAK], 1)} of the {tested} path(s) tested.")
+        if count[NOT_TESTED]:
+            statement += f" {count[NOT_TESTED]} more listed path(s) were not tested."
     elif grade == INCONCLUSIVE or count[INCONCLUSIVE]:
         code = V_INCONCLUSIVE
     elif grade == OBSERVATION:
@@ -607,6 +618,8 @@ def _verdict(grade: str, paths: Sequence[Dict[str, Any]], control_status: str) -
     if code == V_INCONCLUSIVE:
         statement = (f"{_HEADLINES[code]}. This is NOT a pass: the run does not show "
                      "that identity B is kept out of identity A's data.")
+        if count[NOT_TESTED]:
+            statement += f" {count[NOT_TESTED]} listed path(s) were not tested."
     elif code == V_NONE_OBSERVED:
         statement = (f"{_HEADLINES[code]}: identity B did not reach identity A's data on "
                      f"any of the {count[OK]} path(s) tested, and the positive control "
@@ -629,7 +642,63 @@ def _verdict(grade: str, paths: Sequence[Dict[str, Any]], control_status: str) -
     }
 
 
-def _reproduce(test: str, url: Optional[str]) -> Dict[str, Any]:
+# Options whose value is a credential or names an identity; the value is
+# replaced on the page. Anything else is shown as it was typed.
+_SECRET_OPTIONS = {
+    "--token-a": "<TOKEN_A>", "--token-b": "<TOKEN_B>", "--token-sibling": "<TOKEN_SIBLING>",
+    "--api-key": "<API_KEY>", "--bearer": "<BEARER>", "--key": "<KEY>",
+    "--user-a": "<USER_A>", "--user-b": "<USER_B>", "--user-sibling": "<USER_SIBLING>",
+}
+_KIND_VALUE_OPTIONS = {"--edge-identity": "<TOKEN>", "--edge-user": "<USER>"}
+# Options that only shape this page; they are left out of the command.
+_PAGE_OPTIONS = ("--evidence",)
+
+
+def reproduce_command(argv: Sequence[str]) -> Optional[str]:
+    """The ``stranger-test`` command line in ``argv`` (everything after the
+    program name), with every credential value replaced by a placeholder.
+
+    Returns None when ``argv`` is not a ``confirm`` command, so that a page is
+    never given a command it cannot vouch for."""
+    words = [str(word) for word in argv]
+    if "confirm" not in words:
+        return None
+    out: List[str] = ["stranger-test"]
+    index = 0
+    while index < len(words):
+        word = words[index]
+        name, eq, _ = word.partition("=")
+        if any(name == o or name.startswith(o + "-") for o in _PAGE_OPTIONS):
+            index += 1 if eq else 2         # drop the option and its value
+            continue
+        if name in _SECRET_OPTIONS:
+            out += [name, _SECRET_OPTIONS[name]]
+            index += 1 if eq else 2
+            continue
+        if name in _KIND_VALUE_OPTIONS:
+            value = word.partition("=")[2] if eq else (words[index + 1] if index + 1 < len(words) else "")
+            kind = value.partition("=")[0] if "=" in value else "KIND"
+            kind = kind if re.fullmatch(r"[a-z_-]{1,20}", kind) else "KIND"
+            out += [name, f"{kind}={_KIND_VALUE_OPTIONS[name]}"]
+            index += 1 if eq else 2
+            continue
+        if re.match(r"^https?://", word):
+            cleaned = _clean_url(word) or "<TARGET_URL>"
+            word = cleaned + ("?<QUERY>" if "?" in word and cleaned != "<TARGET_URL>" else "")
+        out.append(word)
+        index += 1
+    plain = re.compile(r"<[A-Z_]+>|[a-zA-Z_-]{1,20}=<[A-Z_]+>|https?://[^\s'\"]*\?<QUERY>")
+    quoted = [w if plain.fullmatch(w) else shlex.quote(w) for w in out]
+    return " ".join(quoted)
+
+
+def _reproduce(test: str, url: Optional[str], command: Optional[str] = None) -> Dict[str, Any]:
+    if command:
+        return {"commands": [command + " --evidence evidence.md"],
+                "exact": True,
+                "note": "This is the command that produced this page, with each credential "
+                        "replaced by a placeholder in angle brackets. Credentials are never "
+                        "written to this page. Run it with the same two test accounts."}
     target = url or "<TARGET_URL>"
     if test in ("confused-deputy", "subscriptions"):
         run = f"stranger-test confirm {test} --demo"
@@ -642,7 +711,9 @@ def _reproduce(test: str, url: Optional[str]) -> Dict[str, Any]:
                 "they are never written to this page. Add any test-specific options "
                 "used in the original run.")
     return {"commands": [run, "python3 -m strangertest.evidence result.json --out evidence.md"],
-            "note": note}
+            "exact": False,
+            "note": note + " This page was built from a saved result, so the options of "
+                           "the original run are not known to it."}
 
 
 def _tool_version() -> str:
@@ -665,7 +736,10 @@ def build_evidence(result: Any, *, system_name: Optional[str] = None,
                    operator: Optional[str] = None, notes: Optional[str] = None,
                    now: Optional[datetime] = None,
                    run_started: Optional[datetime] = None,
-                   run_finished: Optional[datetime] = None) -> Dict[str, Any]:
+                   run_finished: Optional[datetime] = None,
+                   identity_a: Optional[str] = None, identity_b: Optional[str] = None,
+                   command: Optional[Sequence[str]] = None,
+                   result_file: Optional[str] = None) -> Dict[str, Any]:
     """Turn one ``confirm`` result into a JSON-serialisable evidence document.
 
     ``result`` is a report object or the dict ``confirm --json`` prints (see the
@@ -702,8 +776,11 @@ def build_evidence(result: Any, *, system_name: Optional[str] = None,
         "Two test identities chosen by the operator were used. Other roles, tenants "
         "and administrator access were not tested.",
         "The test used a made-up marker, not real customer data.",
-        "The run was carried out by the operator named here, not witnessed by an "
-        "independent party.",
+        ("The run was carried out by the operator named on this page" if _clean_text(operator)
+         else "The run was carried out by whoever operated the tool (not named on this page)")
+        + ", and was not witnessed by an independent party.",
+        "The times on this page come from the clock of the machine that ran the tool. "
+        "The page is not signed.",
     ] + list(spec["limits"])
     if untested:
         limits.append("Listed but not tested in this run: " + ", ".join(untested) + ".")
@@ -725,7 +802,7 @@ def build_evidence(result: Any, *, system_name: Optional[str] = None,
                    "environment": _clean_text(environment)},
         "operator": _clean_text(operator),
         "notes": _clean_text(notes, 1000),
-        "identities": _identities(data),
+        "identities": _identities(data, {"A": identity_a, "B": identity_b}),
         "marker_fingerprint": marker,
         "positive_control": control,
         "paths": paths,
@@ -735,8 +812,9 @@ def build_evidence(result: Any, *, system_name: Optional[str] = None,
             "controls": [dict(id=cid, **CONTROLS[cid]) for cid in CONTROL_MAP[test]],
         },
         "limits": limits,
-        "reproduce": _reproduce(test, url),
+        "reproduce": _reproduce(test, url, reproduce_command(command) if command else None),
         "source": {
+            "result_file": os.path.basename(result_file) if result_file else None,
             "result_sha256": canonical_digest(data),
             "canonical_form": "JSON, UTF-8, keys sorted, separators ',' and ':', "
                               "non-ASCII escaped",
@@ -778,11 +856,11 @@ def render_markdown(evidence: Dict[str, Any]) -> str:
     lines += ["## What was tested", "", ev["test"]["description"], ""]
     facts = [
         ("Test", f"{ev['test']['title']} (`{ev['test']['id']}`)"),
-        ("System", system.get("name")),
-        ("System version", system.get("version")),
-        ("Environment", system.get("environment")),
-        ("Target", f"`{ev['target']['url']}`" if ev["target"].get("url") else "not recorded"),
-        ("Operator", ev.get("operator")),
+        ("System", system.get("name") or "not stated by the operator"),
+        ("System version", system.get("version") or "not stated by the operator"),
+        ("Environment", system.get("environment") or "not stated by the operator"),
+        ("Address tested", f"`{ev['target']['url']}`" if ev["target"].get("url") else "not recorded"),
+        ("Run by", ev.get("operator") or "not stated by the operator"),
         ("Test run started (UTC)", (ev.get("run") or {}).get("started_at_utc")
          or "not recorded (page built from a saved result)"),
         ("Test run finished (UTC)", (ev.get("run") or {}).get("finished_at_utc")),
@@ -791,34 +869,51 @@ def render_markdown(evidence: Dict[str, Any]) -> str:
         ("Notes", ev.get("notes")),
     ]
     lines += [f"- {name}: {value}" for name, value in facts if value]
-    lines += ["", "The result file does not record when the test ran. The time above is "
+    lines.append("")
+    if not (ev.get("run") or {}).get("started_at_utc"):
+        lines += ["The result file does not record when the test ran. The time above is "
                   "when this page was generated from it.", ""]
 
     lines += ["## How", "",
-              "The test acts as two identities against the system. Credentials are never "
-              "written here; where the result file has them, only short `sha256` "
-              "fingerprints are shown.", ""]
+              "The test signs in as two separate test accounts, called identity A and "
+              "identity B. A stores a unique made-up value (the marker). B then tries to "
+              "get it. Credentials are never written here; a short `sha256` fingerprint "
+              "stands in for each, so two pages can be compared without revealing them.", ""]
     for ident in ev["identities"]:
         extras = []
         if ident.get("credential_fingerprint"):
             extras.append(f"credential `{ident['credential_fingerprint']}`")
         if ident.get("principal_fingerprint"):
-            extras.append(f"principal reported by the system `{ident['principal_fingerprint']}`")
+            extras.append(f"account the system reported for it `{ident['principal_fingerprint']}`")
         tail = f" ({'; '.join(extras)})" if extras else ""
-        lines.append(f"- Identity {ident['label']}: {ident['role']}{tail}")
+        said = (f" Described by the operator as: {ident['described_as']}."
+                if ident.get("described_as") else "")
+        lines.append(f"- Identity {ident['label']}: {ident['role']}{said}{tail}")
     if ev.get("marker_fingerprint"):
         lines.append(f"- Marker fingerprint: `{ev['marker_fingerprint']}`")
-    lines += ["", f"Positive control. {control['description']}", "",
+    lines += ["", f"Baseline check (also called a positive control). {control['description']}", "",
               f"**{control['statement']}**", ""]
     lines += [f"- {c['meaning']}: {_show(c['value'])}" for c in control["checks"]]
     if control["checks"]:
         lines.append("")
 
-    lines += ["## Results", "", "| Path | What it checks | Grade | Meaning |",
-              "| --- | --- | --- | --- |"]
+    counts = verdict.get("path_counts") or {}
+    tested = sum(1 for path in ev["paths"] if path["grade"] != NOT_TESTED)
+    lines += ["## Results", "",
+              f"A path is one way of getting at the data. {len(ev['paths'])} paths are "
+              f"listed: {tested} tested, {counts.get(NOT_TESTED.lower(), 0)} not tested.", "",
+              "- LEAK: identity B got identity A's data.",
+              "- OK: identity B did not get it, and A could (so the refusal means something).",
+              "- NOT TESTED: the path was not checked. It is not a pass.",
+              "- INCONCLUSIVE: no clear answer. It is not a pass.",
+              "- OBSERVATION: something to review. It is not a pass.", "",
+              "| Path | What it checks | Grade | HTTP status seen | Meaning |",
+              "| --- | --- | --- | --- | --- |"]
     for path in ev["paths"]:
         grade = path["grade"].replace("_", " ")
-        lines.append(f"| `{_cell(path['name'])}` | {_cell(path['what'])} | {grade} | "
+        seen = "; ".join(f"{who} {path[key]}" for who, key in
+                         (("A", "a_http_status"), ("B", "b_http_status")) if key in path) or "-"
+        lines.append(f"| `{_cell(path['name'])}` | {_cell(path['what'])} | {grade} | {seen} | "
                      f"{_cell(path['meaning'])} |")
     lines += ["", f"Overall: **{verdict['headline']}**.", ""]
     if verdict["code"] in (V_INCONCLUSIVE, V_OBSERVATION):
@@ -837,27 +932,60 @@ def render_markdown(evidence: Dict[str, Any]) -> str:
     lines += ["## Reproduce", "", "```bash"] + list(ev["reproduce"]["commands"]) + ["```", "",
               ev["reproduce"]["note"], ""]
 
+    saved = ev["source"].get("result_file")
     lines += ["## Integrity", "",
-              f"- Result digest: `{ev['source']['result_sha256']}`",
+              f"- Raw result file: `{saved}` (written next to this page)" if saved
+              else "- Raw result file: the file this page was built from",
+              f"- Digest of the raw result: `{ev['source']['result_sha256']}`",
               f"- Computed over: the raw result as {ev['source']['canonical_form']}.",
               f"- Evidence format: `{ev['schema']}`", "",
-              "To check it, run `python3 -m strangertest.evidence RESULT.json --digest` "
-              "on the raw result file and compare.", ""]
+              "The digest ties this page to one raw result: run "
+              f"`python3 -m strangertest.evidence {saved or 'RESULT.json'} --digest` and compare. "
+              "It does not protect this page itself, and neither file is signed. The tool "
+              "prints the `sha256` of this page when it writes it; record that value, the "
+              "page and the raw result where your evidence is kept (a ticket or an audit "
+              "folder) on the day of the run.", ""]
     return "\n".join(lines)
 
 
-def write_evidence(path: str, result: Any, *, fmt: Optional[str] = None, **meta: Any) -> Dict[str, Any]:
+def _result_path(path: str) -> str:
+    stem, ext = os.path.splitext(str(path))
+    return (stem if ext.lower() in (".md", ".json", ".markdown", ".txt") else str(path)) + ".result.json"
+
+
+def write_evidence(path: Any, result: Any, *, fmt: Optional[str] = None,
+                   save_result: bool = False, **meta: Any) -> Dict[str, Any]:
     """Build the evidence for ``result`` and write it to ``path``.
 
-    ``fmt`` is ``"md"`` or ``"json"``; by default a path ending in ``.json`` gets
-    JSON and anything else gets Markdown. ``meta`` is passed to ``build_evidence``.
+    ``path`` is one file or a list of files; several files (say a ``.md`` and a
+    ``.json``) are written from the same run and say the same thing. ``fmt`` is
+    ``"md"`` or ``"json"``; by default a path ending in ``.json`` gets JSON and
+    anything else gets Markdown. With ``save_result`` the raw result is written
+    next to the first file as ``<name>.result.json``, so the digest on the page
+    can be checked later. ``meta`` is passed to ``build_evidence``.
+
+    The returned document has one extra key, ``"written"``: a list of
+    ``{"path", "sha256"}`` for each file written (not part of the page).
     """
+    paths = [str(p) for p in (path if isinstance(path, (list, tuple)) else [path])]
+    written: List[Dict[str, str]] = []
+    if save_result:
+        raw = _result_path(paths[0])
+        if raw in paths:
+            raise ValueError(f"{raw} is where the raw result is saved; choose another evidence file name")
+        text = json.dumps(_as_dict(result), sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+        with open(raw, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        written.append({"path": raw, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()})
+        meta = dict(meta, result_file=raw)
     evidence = build_evidence(result, **meta)
-    kind = fmt or ("json" if str(path).lower().endswith(".json") else "md")
-    text = render_json(evidence) if kind == "json" else render_markdown(evidence)
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    return evidence
+    for one in paths:
+        kind = fmt or ("json" if one.lower().endswith(".json") else "md")
+        text = render_json(evidence) if kind == "json" else render_markdown(evidence)
+        with open(one, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        written.append({"path": one, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()})
+    return dict(evidence, written=written)
 
 
 # --------------------------------------------------------------------------- #
@@ -879,6 +1007,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--environment", default=None, help="for example: staging")
     parser.add_argument("--operator", default=None, help="who ran the test")
     parser.add_argument("--notes", default=None, help="one line of context")
+    parser.add_argument("--identity-a", default=None,
+                        help="a few words describing test account A (never a credential)")
+    parser.add_argument("--identity-b", default=None,
+                        help="a few words describing test account B (never a credential)")
     parser.add_argument("--digest", action="store_true",
                         help="print only the result digest and exit")
     args = parser.parse_args(argv)
@@ -904,7 +1036,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         evidence = build_evidence(
             data, system_name=args.system_name, system_version=args.system_version,
-            environment=args.environment, operator=args.operator, notes=args.notes)
+            environment=args.environment, operator=args.operator, notes=args.notes,
+            identity_a=args.identity_a, identity_b=args.identity_b)
     except (TypeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

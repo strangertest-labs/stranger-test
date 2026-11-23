@@ -6,6 +6,7 @@ stopped in-process. Nothing reaches the network."""
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import os
@@ -432,6 +433,161 @@ class Determinism(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(md.count("\n## "), len(SECTIONS))
         self.assertIn("| `exact` | B asks A's exact question | OK |", md)
+
+
+class AuditorReadability(unittest.TestCase):
+    """The points a reviewer raised on real pages (2026-11-22)."""
+
+    def test_the_command_that_ran_is_shown_without_its_credentials(self):
+        argv = ["confirm", "agent-memory", "http://user:pw@127.0.0.1:4671/api?bundle_key=SECRETKEY",
+                "--token-a", "tok-alice", "--token-b=tok-ali", "--token-sibling", "tok-al",
+                "--api-key", "sk-live-1", "--user-a", "alice", "--namespace-a", "alice",
+                "--namespace-b", "ali", "--assistant", "memory", "--save-input",
+                '{"marker": "{marker}"}', "--edge-identity", "dot=tok-a.b@a.b",
+                "--edge-user=case=Alice", "--write-paths",
+                "--evidence", "out/page.md", "--evidence=out/page.json",
+                "--evidence-operator", "Platform QA", "--evidence-system=Billing"]
+        command = ev.reproduce_command(argv)
+        for secret in ("tok-alice", "tok-ali", "tok-al ", "sk-live-1", "SECRETKEY", "user:pw",
+                       "tok-a.b", "Alice", "Platform QA", "Billing", "out/page"):
+            self.assertNotIn(secret, command + " ", secret)
+        for kept in ("stranger-test confirm agent-memory http://127.0.0.1:4671/api?<QUERY>",
+                     "--token-a <TOKEN_A>", "--token-b <TOKEN_B>", "--token-sibling <TOKEN_SIBLING>",
+                     "--api-key <API_KEY>", "--user-a <USER_A>", "--namespace-a alice",
+                     "--namespace-b ali", "--assistant memory", "--edge-identity dot=<TOKEN>",
+                     "--edge-user case=<USER>", "--write-paths",
+                     """--save-input '{"marker": "{marker}"}'"""):
+            self.assertIn(kept, command, kept)
+
+    def test_only_a_confirm_command_is_vouched_for(self):
+        self.assertIsNone(ev.reproduce_command(["scan", "http://127.0.0.1:1/mcp"]))
+        self.assertIsNone(ev.reproduce_command([]))
+
+    def test_a_page_from_a_live_run_carries_its_full_command(self):
+        report = memory_run("leaky")
+        doc, page, _ = both(report, command=["confirm", "agent-memory", "http://127.0.0.1:9/x",
+                                             "--token-a", "tok-alice", "--token-b", "tok-bob",
+                                             "--namespace-a", "alice", "--namespace-b", "bob"])
+        self.assertTrue(doc["reproduce"]["exact"])
+        self.assertEqual(len(doc["reproduce"]["commands"]), 1)
+        self.assertIn("--namespace-a alice --namespace-b bob --evidence evidence.md", page)
+        self.assertNotIn("tok-alice", page)
+        self.assertNotIn("Add any test-specific options", page)
+
+    def test_a_page_from_a_saved_result_says_the_options_are_not_known(self):
+        doc, page, _ = both(memory_run("leaky"))
+        self.assertFalse(doc["reproduce"]["exact"])
+        self.assertIn("the options of the original run are not known", page)
+
+    def test_run_times_and_the_not_recorded_sentence_never_appear_together(self):
+        sentence = "The result file does not record when the test ran."
+        report = cache_run("safe")
+        _, live, _ = both(report, run_started=NOW, run_finished=NOW + timedelta(seconds=3))
+        self.assertIn("- Test run started (UTC): ", live)
+        self.assertNotIn(sentence, live)
+        _, saved, _ = both(report)
+        self.assertIn(sentence, saved)
+        self.assertIn("not recorded (page built from a saved result)", saved)
+
+    def test_a_failure_summary_also_counts_what_was_not_tested(self):
+        doc, page, _ = both(memory_run("leaky"))
+        untested = doc["verdict"]["path_counts"]["not_tested"]
+        self.assertGreater(untested, 0)
+        self.assertIn(f"{untested} more listed path(s) were not tested.", doc["verdict"]["statement"])
+        tested = len(doc["paths"]) - untested
+        self.assertIn(f"{len(doc['paths'])} paths are listed: {tested} tested, {untested} not tested.",
+                      page)
+
+    def test_who_and_what_are_stated_or_said_to_be_missing(self):
+        report = cache_run("safe")
+        _, bare, _ = both(report)
+        for line in ("- System: not stated by the operator", "- Run by: not stated by the operator",
+                     "- Environment: not stated by the operator"):
+            self.assertIn(line, bare)
+        self.assertIn("whoever operated the tool (not named on this page)", bare)
+        self.assertNotIn("the operator named", bare)
+        doc, full, _ = both(report, operator="Platform QA", system_name="Answer cache",
+                            identity_a="test account alice (tenant 1)",
+                            identity_b="test account ali (tenant 2, id is a prefix of A's)")
+        self.assertIn("- Run by: Platform QA", full)
+        self.assertIn("carried out by the operator named on this page", full)
+        self.assertIn("Described by the operator as: test account alice (tenant 1).", full)
+        self.assertEqual(doc["identities"][1]["described_as"],
+                         "test account ali (tenant 2, id is a prefix of A's)")
+
+    def test_each_tested_path_shows_the_statuses_seen(self):
+        doc, page, _ = both(memory_run("safe"))
+        with_status = [p for p in doc["paths"] if "b_http_status" in p and "a_http_status" in p]
+        self.assertTrue(with_status)
+        self.assertIn("| HTTP status seen |", page)
+        one = with_status[0]
+        self.assertIn(f"A {one['a_http_status']}; B {one['b_http_status']}", page)
+
+    def test_grades_are_explained_on_the_page(self):
+        _, page, _ = both(cache_run("safe"))
+        for line in ("- NOT TESTED: the path was not checked. It is not a pass.",
+                     "Baseline check (also called a positive control)."):
+            self.assertIn(line, page)
+        self.assertIn("neither file is signed", page)
+
+    def test_one_run_writes_both_formats_and_the_raw_result(self):
+        report = memory_run("leaky")
+        with tempfile.TemporaryDirectory() as tmp:
+            md, js = os.path.join(tmp, "page.md"), os.path.join(tmp, "page.json")
+            doc = ev.write_evidence([md, js], report, save_result=True, now=NOW,
+                                    run_started=NOW, run_finished=NOW)
+            raw = os.path.join(tmp, "page.result.json")
+            self.assertEqual([item["path"] for item in doc["written"]], [raw, md, js])
+            for item in doc["written"]:
+                with open(item["path"], "rb") as handle:
+                    self.assertEqual(hashlib.sha256(handle.read()).hexdigest(), item["sha256"])
+            with open(raw) as handle:
+                self.assertEqual(ev.canonical_digest(json.load(handle)),
+                                 doc["source"]["result_sha256"])
+            with open(js) as handle:
+                saved = json.load(handle)
+            self.assertEqual(saved["source"]["result_file"], "page.result.json")
+            self.assertNotIn("written", saved)
+            with open(md, encoding="utf-8") as handle:
+                page = handle.read()
+            self.assertIn("- Raw result file: `page.result.json`", page)
+            self.assertIn(saved["source"]["result_sha256"], page)
+            self.assertEqual(saved["verdict"]["statement"] in page, True)
+
+    def test_the_raw_result_never_overwrites_an_evidence_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                ev.write_evidence([os.path.join(tmp, "page.md"),
+                                   os.path.join(tmp, "page.result.json")],
+                                  cache_run("safe"), save_result=True)
+
+    def test_confirm_writes_the_page_with_the_operator_s_words(self):
+        from strangertest import cli
+        with serving(memory_server, "leaky") as url, tempfile.TemporaryDirectory() as tmp:
+            md, js = os.path.join(tmp, "e.md"), os.path.join(tmp, "e.json")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(["confirm", "agent-memory", url, "--token-a", "tok-alice",
+                                 "--token-b", "tok-bob", "--namespace-a", "alice",
+                                 "--namespace-b", "bob", "--evidence", md, "--evidence", js,
+                                 "--evidence-system", "Practice agent server",
+                                 "--evidence-operator", "QA", "--evidence-environment", "local",
+                                 "--evidence-identity-a", "test account alice"])
+            self.assertEqual(code, 1)                      # a leak is a failing exit
+            with open(md, encoding="utf-8") as handle:
+                page = handle.read()
+            for line in ("- System: Practice agent server", "- Run by: QA", "- Environment: local",
+                         "Described by the operator as: test account alice.",
+                         "--namespace-a alice --namespace-b bob --evidence evidence.md",
+                         "- Raw result file: `e.result.json`"):
+                self.assertIn(line, page)
+            self.assertNotIn("tok-alice", page)
+            self.assertNotIn("does not record when the test ran", page)
+            self.assertEqual(err.getvalue().count("evidence written: "), 3)
+            self.assertRegex(err.getvalue(), r"e\.md  sha256:[0-9a-f]{64}")
+            with open(js) as handle:
+                self.assertEqual(json.load(handle)["operator"], "QA")
+            self.assertTrue(os.path.exists(os.path.join(tmp, "e.result.json")))
 
 
 class CommandLine(unittest.TestCase):

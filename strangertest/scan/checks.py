@@ -173,6 +173,15 @@ def check_session_id_as_bearer(profile: TargetProfile, live: Optional[Callable])
             "Probe with a forged session id unbound to the caller, then run the lab "
             "deep-check to confirm whether sessions are isolated.",
         )
+    if field_of(s, "per_request_form") is True:
+        return ScanFinding(
+            cid, title, "OK", "info",
+            "Not applicable: the server speaks the per-request form of MCP (2026-07-28), "
+            "which has no session ids, so no session id was sent or probed.",
+            {"per_request_form": True},
+            "No action. If the server also accepts a session id from older clients, "
+            "check that path with an older client.",
+        )
     if field_of(s, "accepts_forged_session_id") is False or field_of(s, "issues_session_id") is True:
         return ScanFinding(
             cid, title, "OK", "info",

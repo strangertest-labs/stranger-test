@@ -55,6 +55,9 @@ class SessionInfo:
     issues_session_id: Optional[bool] = None
     echoes_inbound_session_id: Optional[bool] = None
     accepts_forged_session_id: Optional[bool] = None
+    #: True when the server was used in the per-request form (2026-07-28),
+    #: which has no session ids.
+    per_request_form: Optional[bool] = None
 
 
 @dataclass

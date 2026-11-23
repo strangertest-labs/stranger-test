@@ -232,7 +232,28 @@ permitted the test. There is deliberately no "scan everything" mode: one target,
 one authorization. Any real finding is for **private, responsible disclosure**
 to the server's owner. Do not name-and-shame.
 
-## What's new in 0.4.0
+## What's new in 0.4.1
+
+- **Connects to current MCP gateways.** The client opened connections with the
+  older `initialize` handshake while naming the newest protocol version, which
+  has no handshake; some gateways refused it. It now settles on a form the
+  server accepts: the per-request form (2026-07-28) or an older handshake
+  version, with the `MCP-Protocol-Version` header those versions require.
+- **`scan` no longer calls an unexamined server clean.** When a server refuses
+  every form, the verdict is "not examined", not "no risk signals". `scan` can
+  also examine servers that speak only the per-request form, and it now
+  completes the handshake and keeps the session a server issues.
+- **The evidence page stands on its own.** `confirm` takes the operator's own
+  words (`--evidence-system`, `--evidence-system-version`,
+  `--evidence-environment`, `--evidence-operator`, `--evidence-notes`,
+  `--evidence-identity-a`, `--evidence-identity-b`). `--evidence` can be given
+  twice to write Markdown and JSON from one run, and the raw result is saved
+  beside them. The page shows the command that was run with credentials
+  replaced, counts tested and untested paths in every summary, explains each
+  grade, and shows the HTTP status seen on each path. See
+  [docs/EVIDENCE.md](docs/EVIDENCE.md).
+
+### 0.4.0
 
 - **`confirm semantic-cache`** — a seventh deep test, for **response caches**:
   can identity B get the answer a cache stored for identity A, by the same
