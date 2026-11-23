@@ -115,6 +115,14 @@ CONTROLS: Dict[str, Dict[str, str]] = {
                      "(embeddings): the test checks that such a lookup does not cross "
                      "from one identity to another.",
     },
+    "CC6.1": {
+        "framework": "AICPA Trust Services Criteria (used in SOC 2)",
+        "title": "Logical access security (nearest criterion)",
+        "relevance": "No Trust Services Criterion names tenant segregation. CC6.1 is the "
+                     "nearest: it is about restricting logical access to data. A test that "
+                     "one test account cannot reach another's data is one kind of evidence "
+                     "about that; whether it counts is the auditor's judgement.",
+    },
     "AIS-14": {
         "framework": "CSA AI Controls Matrix",
         "title": "AI Cache Protection",
@@ -123,8 +131,8 @@ CONTROLS: Dict[str, Dict[str, str]] = {
     },
 }
 
-_SEGREGATION = ("IVS-06",)
-_OBJECT_ACCESS = ("API1:2023", "IVS-06")
+_SEGREGATION = ("IVS-06", "CC6.1")
+_OBJECT_ACCESS = ("API1:2023", "IVS-06", "CC6.1")
 
 # confirm test id -> control identifiers. Deliberately narrow: a control is
 # listed only where the test checks exactly what the control is about.

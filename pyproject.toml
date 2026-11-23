@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "stranger-test"
 dynamic = ["version"]
-description = "Tests MCP servers for cross-identity and delegated-authority (RFC 8693) authorization leaks."
+description = "Two-user tenant isolation tests for AI applications: MCP servers and gateways, agent memory, and LLM response caches."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
@@ -17,10 +17,14 @@ keywords = [
     "security",
     "authorization",
     "confused-deputy",
+    "tenant-isolation",
+    "agent-memory",
+    "semantic-cache",
+    "llm",
 ]
 dependencies = []
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",

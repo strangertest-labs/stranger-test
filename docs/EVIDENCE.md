@@ -178,6 +178,7 @@ standard itself.
 | --- | --- | --- | --- |
 | OWASP API1:2023 | Broken Object Level Authorization | `state-handle`, `tasks-idor`, `agent-memory` | The test checks whether one identity can reach an object that belongs to another. |
 | CSA CCM IVS-06 | Segmentation and Segregation | every test | The test checks that one tenant's data stays apart from another's on the paths listed. |
+| AICPA TSC CC6.1 (SOC 2) | Logical access security (nearest criterion) | every test | No Trust Services Criterion names tenant segregation. CC6.1, on restricting logical access to data, is the nearest. Whether a page counts toward it is the auditor's judgement. |
 | OWASP LLM08:2025 | Vector and Embedding Weaknesses | `semantic-cache` | Applies where the store is looked up by similarity. |
 | CSA AICM AIS-14 | AI Cache Protection | `semantic-cache` | The test checks that a cached answer stored for one identity is not served to another. |
 

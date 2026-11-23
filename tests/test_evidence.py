@@ -160,7 +160,7 @@ class RealProbeShapes(unittest.TestCase):
         self.assertEqual(grades, {"exact": "LEAK", "reworded": "LEAK",
                                   "prefix_sibling": "NOT_TESTED"})
         self.assertEqual([c["id"] for c in doc["control_mapping"]["controls"]],
-                         ["IVS-06", "LLM08:2025", "AIS-14"])
+                         ["IVS-06", "CC6.1", "LLM08:2025", "AIS-14"])
         self.assertEqual(doc["identities"][0]["credential_fingerprint"],
                          report.fingerprints["id_a"])
         self.assertTrue(doc["target"]["url"].startswith("http://127.0.0.1:46"))
@@ -228,7 +228,7 @@ class RealProbeShapes(unittest.TestCase):
         self.assertEqual(doc["test"]["id"], "agent-memory")
         self.assertEqual(doc["verdict"]["code"], ev.V_FAILURE)
         self.assertEqual([c["id"] for c in doc["control_mapping"]["controls"]],
-                         ["API1:2023", "IVS-06"])
+                         ["API1:2023", "IVS-06", "CC6.1"])
         self.assertEqual(doc["identities"][1]["credential_fingerprint"],
                          report.fingerprints["token_b"])
         self.assertEqual(doc["marker_fingerprint"], report.fingerprints["marker"])
@@ -273,13 +273,18 @@ class EveryConfirmTest(unittest.TestCase):
     def test_control_mapping_is_conservative(self):
         self.assertEqual(set(ev.CONTROL_MAP), set(dt.DEEP_TESTS))
         self.assertEqual(set(ev.CONTROLS),
-                         {"API1:2023", "IVS-06", "LLM08:2025", "AIS-14"})
+                         {"API1:2023", "IVS-06", "CC6.1", "LLM08:2025", "AIS-14"})
         for test_id, ids in ev.CONTROL_MAP.items():
             self.assertEqual("API1:2023" in ids,
                              test_id in ("state-handle", "tasks-idor", "agent-memory"))
             self.assertIn("IVS-06", ids)
+            self.assertIn("CC6.1", ids)
             self.assertEqual("AIS-14" in ids, test_id == "semantic-cache")
             self.assertEqual("LLM08:2025" in ids, test_id == "semantic-cache")
+        # SOC 2 has no criterion that names tenant segregation; the page must say so.
+        self.assertIn("nearest", ev.CONTROLS["CC6.1"]["title"])
+        self.assertIn("No Trust Services Criterion names tenant segregation",
+                      ev.CONTROLS["CC6.1"]["relevance"])
 
     def test_mapping_is_marked_as_a_suggestion(self):
         doc, md, _ = both(cache_dict())

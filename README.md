@@ -1,13 +1,30 @@
 # Stranger Test
 
-**The MCP scanner that _confirms_ cross-user auth leaks — not just flags them.**
+**A two-user test for AI applications: can user B reach user A's data?**
 
-An MCP (Model Context Protocol) server is a trusted middleman: it holds many
-users' credentials, tokens and data behind one endpoint. Stranger Test asks the
-one question that matters: **can one user's data, events, or authority reach
-another user through the server?** Then — unlike a static scanner — it *proves
-the answer* by driving the server as two real identities and watching whether
-the line between them held.
+An AI application keeps many users' data behind one endpoint: in an MCP server
+or gateway, in an agent's memory, in a cache of model answers. Stranger Test
+signs in as two test users. User A stores a unique marker, and the test tries
+each way user B might get it. Each path is graded **LEAK**, **OK** or
+**INCONCLUSIVE**, and a path is only OK if A could read her own data back
+first, so a broken test never passes for a safe system.
+
+What it tests:
+
+- **MCP servers and gateways**: a quick single-user `scan`, and two-user
+  `confirm` tests for state handles, tasks and elicitation.
+- **Agent memory**: threads and long-term store, over the LangGraph Server API
+  (`confirm agent-memory`).
+- **Response caches and LLM gateways**: exact and similar-question lookups
+  (`confirm semantic-cache`).
+
+Each `confirm` run can write a **one-page evidence file** (`--evidence`): what
+was tested, by whom, when, each path's result, what was not tested, and how to
+repeat it. It supplements an independent penetration test; it does not replace
+one. See [docs/EVIDENCE.md](docs/EVIDENCE.md).
+
+Status: early (alpha), one maintainer. Test only systems you run or are
+authorized to test.
 
 ```bash
 # scan any MCP server you run, in ~30s — no third-party dependencies:
@@ -28,9 +45,8 @@ is a thing to look at, not a proven leak. And a single-identity scanner
 **structurally cannot** tell you whether identity B can actually reach identity
 A's data, because it only ever connects as one identity.
 
-Stranger Test adds the axis nobody else covers: a **dynamic, two-identity
-confirmation lab** (`confirm`). It connects as A *and* B, performs the real
-protocol dance, and grades the result **LEAK / OK / INCONCLUSIVE** — with a
+Stranger Test adds a **dynamic, two-identity confirmation lab** (`confirm`).
+It connects as A *and* B, performs the real protocol dance, and grades the result **LEAK / OK / INCONCLUSIVE** — with a
 built-in positive control so "no leak" can never be a silently broken test.
 
 |                         | Static scanners / guardrails | **Stranger Test** |
@@ -232,7 +248,17 @@ permitted the test. There is deliberately no "scan everything" mode: one target,
 one authorization. Any real finding is for **private, responsible disclosure**
 to the server's owner. Do not name-and-shame.
 
-## What's new in 0.4.1
+## What's new in 0.4.2
+
+- **The evidence page names the nearest SOC 2 criterion.** CC6.1 is listed with
+  the plain statement that no Trust Services Criterion names tenant
+  segregation, so it is the nearest one and not an exact match. Whether a page
+  counts toward it is the auditor's judgement.
+- **A security policy** ([SECURITY.md](SECURITY.md)) and a clearer description
+  of what the tool tests. No change to any test.
+
+### 0.4.1
+
 
 - **Connects to current MCP gateways.** The client opened connections with the
   older `initialize` handshake while naming the newest protocol version, which
