@@ -256,6 +256,33 @@ The demo (`--demo`) runs with the write paths on. Use a development server: on
 a server that fails this check, the throwaway objects really are changed or
 deleted.
 
+### Owner-field paths (also `--write-paths`)
+
+The read paths find a missing or mis-scoped check. These two find a different
+failure: a handler that trusts an owner value in the request body instead of
+the authenticated caller. If `--namespace-a alice` is given:
+
+| Path | What B tries |
+|---|---|
+| `owner_in_body_thread_create` | `POST /threads` with `metadata.owner = "alice"` and A then reads the thread as hers |
+| `owner_in_body_store_put` | `PUT /store/items` naming A's namespace (the first label is `"alice"`) and A then reads the item |
+
+They are also gated by `--write-paths`, because each sends a create or a
+store write. They are listed as `NOT_RUN` without it.
+
+With `--write-paths`:
+
+- First A does the same action with no claim: she creates a thread and writes
+  her own item and reads both back. If that control does not hold, the path is
+  `NOT_EXERCISED`.
+- Then B sends the call with A's id in the body or namespace. The oracle is A:
+  if she reads back what B's call made, the path is a `LEAK`. If the server
+  refused B's call, `OK`. If the call was accepted but A does not see it,
+  `OBSERVATION`.
+
+If you do not give `--namespace-a`, both paths are `NOT_RUN` with a note
+saying so.
+
 ## 5. Reading the result
 
 The first line is the overall grade:

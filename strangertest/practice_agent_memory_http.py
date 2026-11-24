@@ -60,6 +60,11 @@ cannot carry at its edge (``tok-alice%20`` is the id ``"alice "``). Modes:
   with success and silently dropped.
 * ``nowrites`` -- like ``safe``, but nobody can update or delete anything (405),
   so the write paths' own controls fail.
+* ``bodyowner`` -- like ``safe``, but the ownership check trusts an ``owner``
+  field the caller supplies in the request body, and a Store write trusts the
+  first namespace label the caller sends, instead of the authenticated
+  identity. A caller who puts another user's id in those fields reaches that
+  user's data; without the field the behaviour is like ``safe``.
 
 NEVER expose this on a network. It stores unauthenticated data by design.
 
@@ -79,7 +84,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 MODES = ("leaky", "safe", "meta", "open", "broken", "prefixbug", "dotbug", "separatorbug",
          "wildcardbug", "casebug", "whitespacebug", "strictids", "writeleak", "writeack",
-         "nowrites")
+         "nowrites", "bodyowner")
 FORBIDDEN_PORTS = {4000, 4444, 8790}
 ASSISTANT_ID = "memory"
 
@@ -143,8 +148,20 @@ class AgentMemoryState:
 
     # -- threads ----------------------------------------------------------
 
+    def _claimed(self, user: str, metadata: Dict[str, Any]) -> str:
+        """In ``bodyowner`` mode the server trusts ``metadata.owner`` from the
+        request body when it is a non-empty string; otherwise the caller's own
+        identity is used. This is the ``bodyowner`` mode's single flaw: a
+        broken handler that filters by a client-supplied field."""
+        if self.mode == "bodyowner" and isinstance(metadata, dict):
+            claimed = metadata.get("owner")
+            if isinstance(claimed, str) and claimed:
+                return claimed
+        return user
+
     def create_thread(self, user: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
-        thread = {"thread_id": str(uuid.uuid4()), "owner": user,
+        owner = self._claimed(user, metadata)
+        thread = {"thread_id": str(uuid.uuid4()), "owner": owner,
                   "metadata": dict(metadata), "values": {}, "history": []}
         with self._lock:
             self.threads[thread["thread_id"]] = thread
@@ -228,6 +245,14 @@ class AgentMemoryState:
     def _owns(self, user: str, namespace: Tuple[str, ...]) -> bool:
         return not self._owner_scoped or (bool(namespace) and namespace[0] == user)
 
+    def _write_owns(self, user: str, namespace: Tuple[str, ...]) -> bool:
+        """Like :meth:`_owns`, but for writes to the Store. In ``bodyowner`` the
+        handler trusts the first namespace label the caller sent, so any
+        non-empty namespace passes."""
+        if self.mode == "bodyowner" and namespace:
+            return True
+        return self._owns(user, namespace)
+
     def _check_namespace(self, user: str, namespace: Tuple[str, ...]) -> None:
         if self.mode == "strictids":
             for label in namespace:
@@ -236,9 +261,17 @@ class AgentMemoryState:
         if not self._owns(user, namespace):
             raise _HTTPError(403, "not your namespace")
 
+    def _check_namespace_for_write(self, user: str, namespace: Tuple[str, ...]) -> None:
+        if self.mode == "strictids":
+            for label in namespace:
+                if not label or "." in label or label != label.strip():
+                    raise _HTTPError(422, "namespace label not accepted")
+        if not self._write_owns(user, namespace):
+            raise _HTTPError(403, "not your namespace")
+
     def put_item(self, user: str, namespace: Tuple[str, ...], key: str, value: Dict[str, Any]) -> None:
-        if self._owns(user, namespace) or self.mode not in ("writeleak", "writeack"):
-            self._check_namespace(user, namespace)
+        if self._write_owns(user, namespace) or self.mode not in ("writeleak", "writeack"):
+            self._check_namespace_for_write(user, namespace)
         elif self.mode == "writeack":
             return
         with self._lock:

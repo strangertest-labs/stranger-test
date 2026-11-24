@@ -21,6 +21,28 @@ back:
 Before each path counts, A must be able to get her own answer back that way. If
 she cannot, the path proves nothing and is not counted as clean.
 
+### Why it matters: two public incidents
+
+Caches have already carried one customer's data to another in production. Both
+of these were disclosed by the companies themselves.
+
+- **OpenAI, March 2023.** A bug in the `redis-py` client library let a request
+  receive another user's cached data. Some ChatGPT users saw titles from
+  another user's chat history. OpenAI's account:
+  [March 20 ChatGPT outage: Here's what happened](https://openai.com/index/march-20-chatgpt-outage/).
+- **Cloudflare, October 2026.** Cloudflare disclosed that 155 responses from the
+  GLM-5.3 model on Workers AI, between 27 August and 9 September 2026,
+  contained data from other customers' requests, after a fault in how the
+  SGLang inference engine handled its KV cache. Cloudflare's account:
+  [Cross-request KV cache exposure in the GLM-5.3 Workers AI model](https://blog.cloudflare.com/kv-cache-exposure-remediation/).
+
+They are not the same kind of cache. The OpenAI case was an application-level
+cache, the layer this test checks. The Cloudflare case was a KV cache: the
+model's internal state in GPU memory, inside the inference server. This test
+does not reach that layer. What the two have in common is the lesson: a cache
+shared between customers needs its own check, and nothing fails loudly when
+that check is missing.
+
 Three optional additions, each with its own section below:
 
 - **Awkward ids** (section 4): more cases like `prefix_sibling`, for ids that

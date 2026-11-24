@@ -1,10 +1,17 @@
-"""One-page evidence of a ``confirm`` result, for a reader who is not a tester.
+"""Evidence of a ``confirm`` result, for a reader who is not a tester.
 
 ``stranger-test confirm <test>`` acts as two identities, A and B, against a
 system you run, and grades whether B can reach A's data. This module turns one
 such result into a short document that an auditor or a customer can read: what
 was tested, how, what came back, what it does not show, and a digest that ties
 the page to the raw result file.
+
+Two renderings of the same document are offered. The full page
+(``render_markdown``) carries everything and prints to several pages. The
+summary (``render_summary``) is the short version: the verdict, the tested
+paths, the untested ones grouped by reason, the limits and the digest. It is
+under half the length of the full page (one to two printed pages against
+four) and always points back to the full page.
 
 Usage::
 
@@ -86,7 +93,7 @@ MAPPING_DISCLAIMER = ("These mappings are the tool author's suggestion, not an a
 
 __all__ = [
     "SCHEMA", "TITLE", "CONTROLS", "CONTROL_MAP", "build_evidence", "render_markdown",
-    "render_json", "canonical_digest", "write_evidence", "main",
+    "render_summary", "render_json", "canonical_digest", "write_evidence", "main",
 ]
 
 
@@ -176,6 +183,8 @@ _TESTS: Dict[str, Dict[str, Any]] = {
             "store_edge_wildcard": "An identity whose id contains a wildcard character searches its own namespace",
             "store_edge_case": "An identity whose id differs from A's only in letter case searches its own namespace",
             "store_edge_whitespace": "An identity whose id differs from A's only by whitespace searches its own namespace",
+            "owner_in_body_thread_create": "B creates a thread claiming A's id in the body and A can then read it",
+            "owner_in_body_store_put": "B writes to A's Store namespace and A reads it back (write path)",
             "thread_update": "B tries to change A's thread by its id (write)",
             "store_put_overwrite": "B tries to overwrite A's memory item (write)",
             "thread_delete": "B tries to delete A's thread by its id (write)",
@@ -853,7 +862,7 @@ def _show(value: Any) -> str:
 
 
 def render_markdown(evidence: Dict[str, Any]) -> str:
-    """One page of plain-language Markdown for a reader who is not a tester."""
+    """The full page, in plain-language Markdown, for a reader who is not a tester."""
     ev = evidence
     verdict, control = ev["verdict"], ev["positive_control"]
     system = ev.get("system") or {}
@@ -956,13 +965,124 @@ def render_markdown(evidence: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+SUMMARY_TITLE = TITLE + " (summary)"
+_SUMMARY_LEGEND = {
+    LEAK: "LEAK: identity B got identity A's data.",
+    OK: "OK: identity B did not get it, and A could.",
+    INCONCLUSIVE: "INCONCLUSIVE: no clear answer. It is not a pass.",
+    OBSERVATION: "OBSERVATION: something to review. It is not a pass.",
+}
+
+
+def render_summary(evidence: Dict[str, Any], full_page: Optional[str] = None) -> str:
+    """The short version of the page, in Markdown: under half its length.
+
+    Built from the same document as :func:`render_markdown` and adds nothing to
+    it. It keeps the verdict, the facts of the run, every tested path with the
+    HTTP statuses seen, the untested paths grouped by the reason they were not
+    tested, the control identifiers, the limits and the digest. It leaves out
+    the reproduce command, the list of baseline checks and the account
+    fingerprints, and says so. ``full_page`` is the file name of the full page
+    when one was written in the same run.
+    """
+    ev = evidence
+    verdict, control = ev["verdict"], ev["positive_control"]
+    system, run = ev.get("system") or {}, ev.get("run") or {}
+    missing = "not stated by the operator"
+    lines: List[str] = [f"# {SUMMARY_TITLE}", ""]
+    lines += [f"**{verdict['statement']}**", ""]
+
+    lines += ["## What was tested", "", ev["test"]["description"], ""]
+    named = ", ".join(x for x in (system.get("name"), system.get("version")) if x) or missing
+    where = system.get("environment") or missing
+    if ev["target"].get("url"):
+        where += f", `{ev['target']['url']}`"
+    if run.get("started_at_utc"):
+        when = f"{run['started_at_utc']} to {run.get('finished_at_utc') or 'not recorded'}"
+    else:
+        when = f"not recorded; this summary was generated {ev['generated_at_utc']}"
+    lines += [f"- Test: {ev['test']['title']} (`{ev['test']['id']}`)",
+              f"- System: {named}",
+              f"- Environment: {where}",
+              f"- Run (UTC): {when}",
+              f"- Run by: {ev.get('operator') or missing}",
+              f"- Tool: {ev['tool']['name']} {ev['tool']['version']}"]
+    if ev.get("notes"):
+        lines.append(f"- Notes: {ev['notes']}")
+    lines.append("")
+
+    lines += ["## How", "",
+              "Two separate test accounts. Identity A stores a made-up value (the marker); "
+              "identity B tries to get it. Credentials appear only as short `sha256` "
+              "fingerprints.", ""]
+    for ident in ev["identities"]:
+        said = ident.get("described_as") or missing
+        tail = (f" (credential `{ident['credential_fingerprint']}`)"
+                if ident.get("credential_fingerprint") else "")
+        lines.append(f"- Identity {ident['label']}: {said}{tail}")
+    lines += [f"- Baseline check (positive control). {control['statement']}", ""]
+
+    tested = [p for p in ev["paths"] if p["grade"] != NOT_TESTED]
+    untested = [p for p in ev["paths"] if p["grade"] == NOT_TESTED]
+    lines += ["## Results", "",
+              f"{len(ev['paths'])} paths are listed: {len(tested)} tested, "
+              f"{len(untested)} not tested.", ""]
+    seen_grades = [g for g in (LEAK, OK, INCONCLUSIVE, OBSERVATION)
+                   if any(p["grade"] == g for p in tested)]
+    lines += [f"- {_SUMMARY_LEGEND[g]}" for g in seen_grades]
+    if tested:
+        lines += ["", "| Path | What it checks | Grade | HTTP status seen |",
+                  "| --- | --- | --- | --- |"]
+        for path in tested:
+            seen = "; ".join(f"{who} {path[key]}" for who, key in
+                             (("A", "a_http_status"), ("B", "b_http_status")) if key in path) or "-"
+            lines.append(f"| `{_cell(path['name'])}` | {_cell(path['what'])} | "
+                         f"{path['grade']} | {seen} |")
+    lines.append("")
+    if untested:
+        lines += [f"Not tested ({len(untested)}). A path that was not tested is not a pass.", ""]
+        reasons: Dict[str, List[str]] = {}
+        for path in untested:
+            reasons.setdefault(path["meaning"], []).append(path["name"])
+        for reason, names in reasons.items():
+            lines.append(f"- {reason} Paths: " + ", ".join(f"`{_cell(n)}`" for n in names) + ".")
+        lines.append("")
+    lines += [f"Overall: **{verdict['headline']}**.", ""]
+    if verdict["code"] in (V_INCONCLUSIVE, V_OBSERVATION):
+        lines += ["This result is NOT a pass. It must not be read as showing that the "
+                  "two identities are isolated.", ""]
+
+    lines += ["## Control mapping", ""]
+    lines += [f"- {item['id']} ({item['framework']}): {item['title']}"
+              for item in ev["control_mapping"]["controls"]]
+    lines += ["", ev["control_mapping"]["disclaimer"], ""]
+
+    # The untested paths are already named above, so that one limit is not repeated.
+    limits = [limit for limit in ev["limits"] if not limit.startswith("Listed but not tested")]
+    lines += ["## Limits", ""] + [f"- {limit}" for limit in limits] + [""]
+
+    saved = ev["source"].get("result_file")
+    lines += ["## Integrity", "",
+              f"- Raw result file: `{saved}`" if saved
+              else "- Raw result file: the file this summary was built from",
+              f"- Digest of the raw result: `{ev['source']['result_sha256']}`",
+              f"- Evidence format: `{ev['schema']}`. Neither file is signed.", ""]
+    more = (f"the full page, `{os.path.basename(full_page)}`," if full_page
+            else "the full page (`python3 -m strangertest.evidence RESULT.json`),")
+    lines += ["This is a summary and adds nothing to the full page. The command to reproduce "
+              "the run, each baseline check and the account fingerprints are in "
+              f"{more} which is the page to keep as evidence.", ""]
+    return "\n".join(lines)
+
+
 def _result_path(path: str) -> str:
     stem, ext = os.path.splitext(str(path))
     return (stem if ext.lower() in (".md", ".json", ".markdown", ".txt") else str(path)) + ".result.json"
 
 
 def write_evidence(path: Any, result: Any, *, fmt: Optional[str] = None,
-                   save_result: bool = False, **meta: Any) -> Dict[str, Any]:
+                   save_result: bool = False, summary: Any = None,
+                   **meta: Any) -> Dict[str, Any]:
     """Build the evidence for ``result`` and write it to ``path``.
 
     ``path`` is one file or a list of files; several files (say a ``.md`` and a
@@ -970,16 +1090,25 @@ def write_evidence(path: Any, result: Any, *, fmt: Optional[str] = None,
     ``"md"`` or ``"json"``; by default a path ending in ``.json`` gets JSON and
     anything else gets Markdown. With ``save_result`` the raw result is written
     next to the first file as ``<name>.result.json``, so the digest on the page
-    can be checked later. ``meta`` is passed to ``build_evidence``.
+    can be checked later. ``summary`` is one file or a list of files that get the
+    short version (:func:`render_summary`) of the same run; ``path`` may then be
+    empty. ``meta`` is passed to ``build_evidence``.
 
     The returned document has one extra key, ``"written"``: a list of
     ``{"path", "sha256"}`` for each file written (not part of the page).
     """
-    paths = [str(p) for p in (path if isinstance(path, (list, tuple)) else [path])]
+    paths = [str(p) for p in (path if isinstance(path, (list, tuple)) else [path]) if p]
+    summaries = [str(p) for p in (summary if isinstance(summary, (list, tuple)) else [summary])
+                 if p]
+    if not paths and not summaries:
+        raise ValueError("no evidence file name was given")
+    clash = sorted(set(paths) & set(summaries))
+    if clash:
+        raise ValueError(f"{clash[0]} is named for both the full page and the summary")
     written: List[Dict[str, str]] = []
     if save_result:
-        raw = _result_path(paths[0])
-        if raw in paths:
+        raw = _result_path((paths or summaries)[0])
+        if raw in paths + summaries:
             raise ValueError(f"{raw} is where the raw result is saved; choose another evidence file name")
         text = json.dumps(_as_dict(result), sort_keys=True, indent=2, ensure_ascii=True) + "\n"
         with open(raw, "w", encoding="utf-8") as handle:
@@ -993,6 +1122,12 @@ def write_evidence(path: Any, result: Any, *, fmt: Optional[str] = None,
         with open(one, "w", encoding="utf-8") as handle:
             handle.write(text)
         written.append({"path": one, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()})
+    full_page = next((one for one in paths if not one.lower().endswith(".json")), None)
+    for one in summaries:
+        text = render_summary(evidence, full_page=full_page)
+        with open(one, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        written.append({"path": one, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()})
     return dict(evidence, written=written)
 
 
@@ -1003,12 +1138,13 @@ def write_evidence(path: Any, result: Any, *, fmt: Optional[str] = None,
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m strangertest.evidence",
-        description="Turn a `stranger-test confirm ... --json` result file into a "
-                    "one-page evidence document.")
+        description="Turn a `stranger-test confirm ... --json` result file into an "
+                    "evidence page, or its short summary.")
     parser.add_argument("result", help="result JSON file written by `confirm --json` "
                                        "(use - for standard input)")
-    parser.add_argument("--format", choices=("md", "json"), default=None,
-                        help="output format (default: md, or json when --out ends in .json)")
+    parser.add_argument("--format", choices=("md", "json", "summary"), default=None,
+                        help="output format: md is the full page, summary is the short "
+                             "version (default: md, or json when --out ends in .json)")
     parser.add_argument("--out", default=None, help="write to this file instead of standard output")
     parser.add_argument("--system-name", default=None, help="name of the system tested")
     parser.add_argument("--system-version", default=None, help="its version or build")
@@ -1051,7 +1187,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     kind = args.format or ("json" if (args.out or "").lower().endswith(".json") else "md")
-    text = render_json(evidence) if kind == "json" else render_markdown(evidence)
+    text = (render_json(evidence) if kind == "json"
+            else render_summary(evidence) if kind == "summary" else render_markdown(evidence))
     if args.out:
         with open(args.out, "w", encoding="utf-8") as handle:
             handle.write(text)

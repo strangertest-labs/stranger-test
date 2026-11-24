@@ -490,12 +490,13 @@ def cmd_confirm(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 3
     _confirm_print(rep, args.json)
-    if getattr(args, "evidence", None):
+    if getattr(args, "evidence", None) or getattr(args, "evidence_summary", None):
         from .evidence import write_evidence
 
         try:
             done = write_evidence(
-                args.evidence, rep, save_result=True, run_started=run_started,
+                args.evidence or [], rep, save_result=True,
+                summary=getattr(args, "evidence_summary", None), run_started=run_started,
                 run_finished=datetime.now(timezone.utc),
                 system_name=args.evidence_system, system_version=args.evidence_system_version,
                 environment=args.evidence_environment, operator=args.evidence_operator,
@@ -644,9 +645,12 @@ def build_parser() -> argparse.ArgumentParser:
                          help="permit a non-loopback target (authorized testing only)")
     confirm.add_argument("--json", action="store_true", help="JSON output")
     confirm.add_argument("--evidence", action="append", default=None, metavar="FILE",
-                         help="also write a one-page evidence file (.md or .json); repeat to "
+                         help="also write the evidence page (.md or .json); repeat to "
                               "write both from the same run. The raw result is saved beside "
                               "it as FILE.result.json. See docs/EVIDENCE.md")
+    confirm.add_argument("--evidence-summary", action="append", default=None, metavar="FILE",
+                         help="also write the short summary of the evidence page (Markdown, "
+                              "under half its length). Can be used with or without --evidence")
     confirm.add_argument("--evidence-system", default=None, metavar="TEXT",
                          help="evidence page: name of the system tested")
     confirm.add_argument("--evidence-system-version", default=None, metavar="TEXT",

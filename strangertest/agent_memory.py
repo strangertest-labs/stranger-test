@@ -26,6 +26,14 @@ Steps:
 6. **Write paths** (only with ``write_paths=True``). B tries to update or
    delete A's thread and to overwrite or delete A's Store item, each on a fresh
    throwaway object the probe created for that one attempt; A then re-reads it.
+7. **Owner-field paths** (also behind ``write_paths=True``, and only when
+   ``namespace_a`` is given). B claims A's id in the request body:
+   ``POST /threads`` with ``metadata.owner = <A's id>``, and
+   ``PUT /store/items`` with A's first namespace label. If the server trusts a
+   client-supplied owner field or the first namespace label instead of the
+   authenticated identity, B's call lands in A's account and A can read it
+   back. A path only grades OK once A has first proved she can create and read
+   a thread of her own and write and read back her own Store item.
 
 Grades: ``LEAK`` (B obtained A's marker on a path whose control held, and auth
 is enforced), ``OK`` (no path leaked and at least one was exercised),
@@ -469,6 +477,99 @@ def run_agent_memory_probe(
          "/store/items/search", {"namespace_prefix": namespace, "limit": 100})
     path("store_search_all", "B searches all memory with no namespace", "POST",
          "/store/items/search", {"namespace_prefix": [], "limit": 100})
+
+    # Owner-field paths: does the server trust an owner value in the request body
+    # or the first namespace label the caller sends, instead of the authenticated
+    # identity? Requires namespace_a so the probe knows what id to claim.
+    a_id_for_claim = list(namespace_a)[0] if namespace_a else None
+
+    # Positive control for the owner paths: can A create a thread and read her
+    # own marker back from it, and write and read back her own Store item?
+    # Without that, a refusal to B does not mean the server is safe.
+    a_own_thread = a.call("GET", f"/threads/{thread_a}")
+    a_owner_thread_ok = created.status == 200 and marker in a_own_thread.body
+    a_own_store = a.call("GET", f"/store/items?namespace={dotted_q}&key={item_key}")
+    a_owner_store_ok = put.status in (200, 204) and marker in a_own_store.body
+
+    def owner_body_thread() -> None:
+        name, what = "owner_in_body_thread_create", "B creates a thread claiming A's id in the body and A can then read it"
+        if not write_paths:
+            paths.append({"name": name, "what": what, "outcome": P_NOT_RUN,
+                          "note": _WRITES_OFF})
+            return
+        if not a_id_for_claim:
+            paths.append({"name": name, "what": what, "outcome": P_NOT_RUN,
+                          "note": "needs --namespace-a so the probe knows A's id to claim"})
+            return
+        if not a_owner_thread_ok:
+            paths.append({"name": name, "what": what, "outcome": P_NOT_EXERCISED,
+                          "note": "A could not create and read a thread of her own, so there "
+                                  "was no baseline"})
+            return
+        created_b = b.call("POST", "/threads",
+                           {"metadata": {"owner": a_id_for_claim,
+                                         "st_probe": tag, "st_marker": marker}})
+        if created_b.status not in (200, 201):
+            paths.append({"name": name, "what": what, "outcome": P_OK,
+                          "b_status": created_b.status,
+                          "note": f"server refused B's create with A's id in the body (HTTP {created_b.status})"})
+            return
+        tid = (created_b.json() or {}).get("thread_id") if isinstance(created_b.json(), dict) else None
+        if not tid:
+            paths.append({"name": name, "what": what, "outcome": P_NOT_EXERCISED,
+                          "b_status": created_b.status,
+                          "note": "server accepted the create but returned no thread id"})
+            return
+        got = a.call("GET", f"/threads/{tid}")
+        if marker in got.body:
+            paths.append({"name": name, "what": what, "outcome": P_LEAK,
+                          "b_status": created_b.status,
+                          "note": "B's create with owner=A was accepted and A can read "
+                                  "the thread as her own"})
+        else:
+            paths.append({"name": name, "what": what, "outcome": P_OK,
+                          "b_status": created_b.status,
+                          "note": "B's create was accepted but A does not see it as hers "
+                                  f"(A got HTTP {got.status})"})
+
+    def owner_body_store() -> None:
+        name, what = "owner_in_body_store_put", "B writes to A's Store namespace and A reads it back"
+        if not write_paths:
+            paths.append({"name": name, "what": what, "outcome": P_NOT_RUN,
+                          "note": _WRITES_OFF})
+            return
+        if not a_id_for_claim:
+            paths.append({"name": name, "what": what, "outcome": P_NOT_RUN,
+                          "note": "needs --namespace-a so the probe knows A's id to claim"})
+            return
+        if not a_owner_store_ok:
+            paths.append({"name": name, "what": what, "outcome": P_NOT_EXERCISED,
+                          "note": "A could not write and read back her own Store item, so there "
+                                  "was no baseline"})
+            return
+        planted_marker = "st-b-planted-" + secrets.token_hex(8)
+        planted_key = "st-b-planted"
+        wrote = b.call("PUT", "/store/items",
+                       {"namespace": namespace, "key": planted_key,
+                        "value": {"text": planted_marker}})
+        if wrote.status not in (200, 201, 204):
+            paths.append({"name": name, "what": what, "outcome": P_OK,
+                          "b_status": wrote.status,
+                          "note": f"server refused B's write to A's namespace (HTTP {wrote.status})"})
+            return
+        got = a.call("GET", f"/store/items?namespace={dotted_q}&key={planted_key}")
+        if planted_marker in got.body:
+            paths.append({"name": name, "what": what, "outcome": P_LEAK,
+                          "b_status": wrote.status,
+                          "note": "B's write to A's namespace was accepted and A reads it back"})
+        else:
+            paths.append({"name": name, "what": what, "outcome": P_OBSERVATION,
+                          "b_status": wrote.status,
+                          "note": f"B's write was accepted (HTTP {wrote.status}) but A does "
+                                  f"not see it (HTTP {got.status})"})
+
+    owner_body_thread()
+    owner_body_store()
 
     # Awkward-id pairs. Each extra identity acts only as itself, in its own
     # namespace: a store or scope check that compares ids loosely hands it A's item.

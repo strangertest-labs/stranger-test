@@ -2,11 +2,14 @@
 
 `stranger-test confirm` tells a tester whether one user can reach another
 user's data. An auditor or a customer asks a different question: "show me that
-you checked". Today the usual answer is a screenshot of a terminal.
+you checked". Auditors usually call the subject customer data segregation;
+engineers call it tenant isolation. Today the usual answer is a screenshot of a terminal.
 
-The evidence file is a one-page answer to that question. It says what was
+The evidence file is a written answer to that question. It says what was
 tested, how, what came back, what the run does not show, and carries a digest
-that ties the page to the raw result file.
+that ties the page to the raw result file. The full page prints to about four
+pages. A short summary of the same run, under half that length, can be written
+alongside it.
 
 It is a record of one test run. It is not an audit opinion and it does not say
 that a system meets any standard.
@@ -27,6 +30,8 @@ stranger-test confirm semantic-cache http://127.0.0.1:8080 \
 
 - `--evidence FILE` writes the page. Give it twice to get Markdown and JSON from
   the same run.
+- `--evidence-summary FILE` writes the short summary (Markdown). It can be given
+  with `--evidence` or on its own. See "The short summary" below.
 - The raw result is saved beside the first file as `evidence.result.json`.
 - `--evidence-system`, `--evidence-system-version`, `--evidence-environment`,
   `--evidence-operator` and `--evidence-notes` are your own words about the run.
@@ -57,8 +62,9 @@ python3 -m strangertest.evidence result.json --out evidence.md \
 
 Options:
 
-- `--format md|json` picks the format. The default is Markdown, or JSON when
-  `--out` ends in `.json`. Without `--out` the page goes to standard output.
+- `--format md|json|summary` picks the format: `md` is the full page and
+  `summary` is the short version. The default is `md`, or JSON when `--out`
+  ends in `.json`. Without `--out` the page goes to standard output.
 - `--system-name`, `--system-version`, `--environment`, `--operator`,
   `--notes`, `--identity-a` and `--identity-b` are your own words about the
   run. They are copied as you give them, on one line. Do not put credentials in
@@ -82,6 +88,37 @@ page = render_markdown(build_evidence(report, system_name="Answer cache"))
 ```
 
 `report` is the object a probe returns, or the dictionary that `--json` prints.
+
+### The short summary
+
+The full page is the record to keep. It is long because it carries every
+baseline check, the exact command and both account fingerprints. For a reader
+who needs the result and its limits and nothing else, write the summary too:
+
+```bash
+stranger-test confirm agent-memory http://127.0.0.1:2024 \
+  --token-a <TOKEN_A> --token-b <TOKEN_B> \
+  --evidence evidence.md --evidence-summary evidence-summary.md
+```
+
+or make one later from a saved result:
+
+```bash
+python3 -m strangertest.evidence evidence.result.json --format summary --out evidence-summary.md
+```
+
+The summary is built from the same document and adds nothing to it. It keeps:
+
+- the verdict sentence and the facts of the run;
+- every tested path, with its grade and the HTTP statuses seen;
+- the untested paths, grouped by the reason they were not tested;
+- the control identifiers, with the note that they are a suggestion;
+- every limit, including that it does not replace a penetration test;
+- the digest of the raw result.
+
+It leaves out the reproduce command, the list of baseline checks and the
+account fingerprints, and its last paragraph says so and names the full page.
+It prints to one or two pages, depending on how many paths were tested.
 
 ## 2. Read one
 

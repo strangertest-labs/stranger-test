@@ -2,6 +2,9 @@
 
 **A two-user test for AI applications: can user B reach user A's data?**
 
+Tenant isolation testing for AI agents, MCP gateways and LLM caches, with an
+evidence page and a short summary for each run.
+
 An AI application keeps many users' data behind one endpoint: in an MCP server
 or gateway, in an agent's memory, in a cache of model answers. Stranger Test
 signs in as two test users. User A stores a unique marker, and the test tries
@@ -16,15 +19,33 @@ What it tests:
 - **Agent memory**: threads and long-term store, over the LangGraph Server API
   (`confirm agent-memory`).
 - **Response caches and LLM gateways**: exact and similar-question lookups
-  (`confirm semantic-cache`).
+  (`confirm semantic-cache`). Shared caches have leaked between customers in
+  production; [two public incidents](docs/CACHE.md#why-it-matters-two-public-incidents).
 
-Each `confirm` run can write a **one-page evidence file** (`--evidence`): what
+Each `confirm` run can write an **evidence page** (`--evidence`): what
 was tested, by whom, when, each path's result, what was not tested, and how to
-repeat it. It supplements an independent penetration test; it does not replace
+repeat it. `--evidence-summary` writes a **short summary** of the same run,
+under half the length, to hand to someone who will not read four pages. It supplements an independent penetration test; it does not replace
 one. See [docs/EVIDENCE.md](docs/EVIDENCE.md).
 
 Status: early (alpha), one maintainer. Test only systems you run or are
 authorized to test.
+
+## Who it is for
+
+- **Security and platform engineers** who run a multi-tenant AI product: a
+  tenant isolation check you can run on every release (there is a
+  [GitHub Action](docs/CI.md)). "Tenant" here means whatever your system keeps
+  apart: customers, users, teams, API keys, or agents acting for different
+  users. Each is an identity, and the test checks the boundary between two of
+  them.
+- **Teams asked to show customer data segregation**, by an auditor or in a
+  customer's security review: the evidence file records one dated test run in
+  plain language. Whether it counts toward a control is the auditor's
+  judgement; see [what it does and does not prove](docs/EVIDENCE.md).
+- **Penetration testers** who already check this by hand with two accounts: a
+  repeatable version of that test, with a baseline check so that a refusal to
+  the second account means something.
 
 ```bash
 # scan any MCP server you run, in ~30s — no third-party dependencies:
@@ -306,9 +327,10 @@ to the server's owner. Do not name-and-shame.
   calls change data; on in `--demo`. See
   [docs/AGENT-MEMORY.md](docs/AGENT-MEMORY.md).
 - **An evidence file per run.** `confirm ... --evidence FILE` (`.md` or `.json`)
-  writes one page: the system, the run times, the two identities as
+  writes the page: the system, the run times, the two identities as
   fingerprints, the positive-control result, each path's outcome and the
-  verdict. An inconclusive run is stated as "not a pass". See
+  verdict. An inconclusive run is stated as "not a pass".
+  `--evidence-summary FILE` writes the short version of the same run. See
   [docs/EVIDENCE.md](docs/EVIDENCE.md).
 - **The GitHub Action runs `semantic-cache`**, in both modes; see
   [docs/CI.md](docs/CI.md).

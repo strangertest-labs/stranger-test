@@ -595,6 +595,154 @@ class AuditorReadability(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(tmp, "e.result.json")))
 
 
+class ShortSummary(unittest.TestCase):
+    """The summary is a shorter rendering of the same document, never a second opinion."""
+
+    def pages(self, result, **meta):
+        doc = ev.build_evidence(result, now=NOW, **meta)
+        return doc, ev.render_markdown(doc), ev.render_summary(doc)
+
+    def test_it_says_what_the_full_page_says(self):
+        doc, page, summary = self.pages(memory_run("safe"), operator="QA")
+        self.assertIn(f"**{doc['verdict']['statement']}**", summary)
+        self.assertIn(f"Overall: **{doc['verdict']['headline']}**.", summary)
+        self.assertIn(doc["source"]["result_sha256"], summary)
+        self.assertIn(ev.PENTEST_LIMIT, summary)
+        self.assertIn(ev.MAPPING_DISCLAIMER, summary)
+        self.assertIn("- Run by: QA", summary)
+        for limit in doc["limits"]:
+            if not limit.startswith("Listed but not tested"):
+                self.assertIn(f"- {limit}", summary)
+        for item in doc["control_mapping"]["controls"]:
+            self.assertIn(f"- {item['id']} (", summary)
+        self.assertTrue(summary.startswith("# " + ev.SUMMARY_TITLE))
+        self.assertIsNone(BANNED.search(summary))
+
+    def test_every_path_is_accounted_for(self):
+        doc, _, summary = self.pages(memory_run("safe"))
+        tested = [p for p in doc["paths"] if p["grade"] != ev.NOT_TESTED]
+        untested = [p for p in doc["paths"] if p["grade"] == ev.NOT_TESTED]
+        self.assertTrue(tested and untested)
+        self.assertIn(f"{len(doc['paths'])} paths are listed: {len(tested)} tested, "
+                      f"{len(untested)} not tested.", summary)
+        for path in tested:
+            row = next(line for line in summary.splitlines()
+                       if line.startswith(f"| `{path['name']}` |"))
+            self.assertIn(f"| {path['grade']} |", row)
+            if "b_http_status" in path:
+                self.assertIn(f"B {path['b_http_status']}", row)
+        self.assertIn(f"Not tested ({len(untested)}). A path that was not tested is not a pass.",
+                      summary)
+        listed = "\n".join(line for line in summary.splitlines() if " Paths: " in line)
+        for path in untested:
+            self.assertIn(f"`{path['name']}`", listed)
+            self.assertNotIn(f"| `{path['name']}` |", summary)   # never in the tested table
+        self.assertLessEqual(listed.count("\n") + 1, len({p["meaning"] for p in untested}))
+
+    def test_a_leak_is_a_leak_in_the_summary_too(self):
+        doc, _, summary = self.pages(memory_run("leaky"))
+        self.assertEqual(doc["verdict"]["code"], ev.V_FAILURE)
+        self.assertIn("Isolation failure observed", summary)
+        self.assertIn("| LEAK |", summary)
+        self.assertIn("- LEAK: identity B got identity A's data.", summary)
+
+    def test_a_run_that_is_not_a_pass_says_so(self):
+        for mode in ("broken", "open"):
+            doc, _, summary = self.pages(memory_run(mode))
+            self.assertTrue(doc["verdict"]["not_a_pass"])
+            self.assertIn("This result is NOT a pass.", summary)
+
+    def test_it_is_under_half_the_length_and_names_what_it_leaves_out(self):
+        _, page, summary = self.pages(memory_run("safe"))
+        self.assertLess(len(summary.split()), len(page.split()) / 2)
+        self.assertNotIn("## Reproduce", summary)
+        self.assertNotIn("stranger-test confirm", summary)
+        self.assertIn("This is a summary and adds nothing to the full page.", summary)
+        self.assertIn("The command to reproduce the run, each baseline check and the account "
+                      "fingerprints are in the full page", summary)
+
+    def test_nothing_reaches_the_summary_that_is_not_on_the_full_page(self):
+        result = cache_dict()
+        result["detail"] = "token tok-secret-123 leaked"
+        result["paths"][0]["note"] = "raw marker st-marker-999"
+        result["observations"] = ["tok-secret-123"]
+        _, _, summary = self.pages(result, notes="one line\nof context")
+        for secret in ("tok-secret-123", "st-marker-999"):
+            self.assertNotIn(secret, summary)
+        self.assertIn("- Notes: one line of context", summary)
+
+    def test_every_bundled_test_renders_a_summary(self):
+        for test, spec in ev._TESTS.items():
+            doc = ev.build_evidence({"probe": spec["probe"], "grade": "OK"}, now=NOW)
+            summary = ev.render_summary(doc)
+            self.assertIn(spec["title"], summary, test)
+            self.assertIn(ev.PENTEST_LIMIT, summary, test)
+
+    def test_one_run_writes_the_page_the_summary_and_the_raw_result(self):
+        report = memory_run("safe")
+        with tempfile.TemporaryDirectory() as tmp:
+            md, short = os.path.join(tmp, "page.md"), os.path.join(tmp, "page-summary.md")
+            doc = ev.write_evidence(md, report, save_result=True, summary=short, now=NOW)
+            raw = os.path.join(tmp, "page.result.json")
+            self.assertEqual([item["path"] for item in doc["written"]], [raw, md, short])
+            with open(short, "rb") as handle:
+                body = handle.read()
+            self.assertEqual(hashlib.sha256(body).hexdigest(), doc["written"][2]["sha256"])
+            text = body.decode("utf-8")
+            self.assertIn("are in the full page, `page.md`, which is the page to keep", text)
+            self.assertIn("- Raw result file: `page.result.json`", text)
+
+    def test_the_summary_can_be_written_on_its_own(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            short = os.path.join(tmp, "s.md")
+            doc = ev.write_evidence([], cache_run("safe"), save_result=True, summary=short, now=NOW)
+            self.assertEqual([os.path.basename(item["path"]) for item in doc["written"]],
+                             ["s.result.json", "s.md"])
+            with open(short, encoding="utf-8") as handle:
+                self.assertIn("python3 -m strangertest.evidence RESULT.json", handle.read())
+
+    def test_bad_file_names_are_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            same = os.path.join(tmp, "page.md")
+            with self.assertRaises(ValueError):
+                ev.write_evidence(same, cache_run("safe"), summary=same)
+            with self.assertRaises(ValueError):
+                ev.write_evidence([], cache_run("safe"))
+            with self.assertRaises(ValueError):
+                ev.write_evidence(same, cache_run("safe"), save_result=True,
+                                  summary=os.path.join(tmp, "page.result.json"))
+
+    def test_confirm_writes_a_summary_and_keeps_it_out_of_the_command(self):
+        from strangertest import cli
+        with serving(memory_server, "safe") as url, tempfile.TemporaryDirectory() as tmp:
+            md, short = os.path.join(tmp, "e.md"), os.path.join(tmp, "e-summary.md")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(["confirm", "agent-memory", url, "--token-a", "tok-alice",
+                                 "--token-b", "tok-bob", "--namespace-a", "alice",
+                                 "--evidence", md, "--evidence-summary", short,
+                                 "--evidence-operator", "QA"])
+            self.assertEqual(code, 0)
+            self.assertEqual(err.getvalue().count("evidence written: "), 3)
+            with open(md, encoding="utf-8") as handle:
+                page = handle.read()
+            with open(short, encoding="utf-8") as handle:
+                summary = handle.read()
+            self.assertIn("--namespace-a alice --evidence evidence.md", page)
+            self.assertNotIn("e-summary.md", page)
+            self.assertIn("- Run by: QA", summary)
+            self.assertNotIn("tok-alice", summary)
+            self.assertRegex(summary, r"- Run \(UTC\): \d{4}-\d\d-\d\dT[\d:]+Z to \d{4}")
+
+            only = os.path.join(tmp, "only.md")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = cli.main(["confirm", "agent-memory", url, "--token-a", "tok-alice",
+                                 "--token-b", "tok-bob", "--evidence-summary", only])
+            self.assertEqual(code, 0)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "only.result.json")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "only.json")))
+
+
 class CommandLine(unittest.TestCase):
     def run_cli(self, *argv):
         out, err = io.StringIO(), io.StringIO()
@@ -626,6 +774,11 @@ class CommandLine(unittest.TestCase):
 
             code, out, _ = self.run_cli(source, "--digest")
             self.assertEqual(out.strip(), ev.canonical_digest(report))
+
+            code, out, _ = self.run_cli(source, "--format", "summary")
+            self.assertEqual(code, 0)
+            self.assertTrue(out.startswith("# " + ev.SUMMARY_TITLE))
+            self.assertIn(ev.canonical_digest(report), out)
 
             page = os.path.join(tmp, "evidence.md")
             ev.write_evidence(page, report, now=NOW, environment="staging")

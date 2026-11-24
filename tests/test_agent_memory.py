@@ -54,8 +54,11 @@ class Grades(unittest.TestCase):
         # No extra identity and no --write-paths: those are listed, never run.
         for name in list(EDGE_PATHS.values())[1:] + list(WRITE_PATHS):
             self.assertEqual(got.pop(name), "NOT_RUN")
+        # Owner-field paths are writes, gated by --write-paths.
+        self.assertEqual(got.pop("owner_in_body_thread_create"), "NOT_RUN")
+        self.assertEqual(got.pop("owner_in_body_store_put"), "NOT_RUN")
         self.assertEqual(set(got.values()), {"LEAK"}, report.summary())
-        self.assertEqual(len(report.paths), 18)
+        self.assertEqual(len(report.paths), 20)
 
     def test_safe_server_is_ok(self):
         report = probe("safe")
@@ -66,6 +69,8 @@ class Grades(unittest.TestCase):
         self.assertEqual(got.pop("store_search_all"), "NOT_EXERCISED")
         for name in list(EDGE_PATHS.values()) + list(WRITE_PATHS):
             self.assertEqual(got.pop(name), "NOT_RUN")
+        self.assertEqual(got.pop("owner_in_body_thread_create"), "NOT_RUN")
+        self.assertEqual(got.pop("owner_in_body_store_put"), "NOT_RUN")
         self.assertEqual(set(got.values()), {"OK"}, report.summary())
         self.assertTrue(report.controls["auth_enforced"])
         self.assertTrue(report.controls["a_agent_recall_sees_marker"])
@@ -99,6 +104,53 @@ class Grades(unittest.TestCase):
         report = probe("leaky", whoami_field="key")
         self.assertEqual(report.grade, OBSERVATION, report.summary())
         self.assertIn("same identity", report.detail)
+
+
+class OwnerFieldInBody(unittest.TestCase):
+    """The server trusts a client-supplied owner field instead of the authenticated identity."""
+
+    def test_bodyowner_server_leaks_on_the_two_owner_paths(self):
+        report = probe("bodyowner", write_paths=True)
+        got = outcomes(report)
+        self.assertEqual(got["owner_in_body_thread_create"], "LEAK", report.summary())
+        self.assertEqual(got["owner_in_body_store_put"], "LEAK", report.summary())
+        self.assertEqual(report.grade, LEAK)
+        # The ordinary by-id read paths still look clean.
+        self.assertEqual(got["store_get"], "OK")
+
+    def test_owner_paths_are_gated_by_write_paths(self):
+        # Both owner paths create or write server-side data, so they only run
+        # with --write-paths, matching the rest of the tool's contract.
+        report = probe("bodyowner")
+        got = outcomes(report)
+        self.assertEqual(got["owner_in_body_thread_create"], "NOT_RUN")
+        self.assertEqual(got["owner_in_body_store_put"], "NOT_RUN")
+
+    def test_safe_server_is_clean_on_the_owner_paths(self):
+        report = probe("safe", write_paths=True)
+        got = outcomes(report)
+        self.assertEqual(got["owner_in_body_thread_create"], "OK")
+        self.assertEqual(got["owner_in_body_store_put"], "OK")
+
+    def test_both_owner_paths_are_listed_without_namespace_a(self):
+        # Without namespace_a the probe does not know what id to claim.
+        with serving("bodyowner") as url:
+            report = run_agent_memory_probe(url, A, B, authorized=True, **AGENT)
+        got = outcomes(report)
+        self.assertEqual(got["owner_in_body_thread_create"], "NOT_RUN")
+        self.assertEqual(got["owner_in_body_store_put"], "NOT_RUN")
+
+    def test_bodyowner_fixture_actually_respects_owner_body(self):
+        # A direct check on the practice server, independent of the probe,
+        # to pin the mode's behaviour.
+        from strangertest.practice_agent_memory_http import AgentMemoryState
+        state = AgentMemoryState("bodyowner")
+        made = state.create_thread("bob", {"owner": "alice"})
+        tid = made["thread_id"]
+        self.assertEqual(state.get_thread("alice", tid)["thread_id"], tid)
+        state.put_item("bob", ("alice", "notes"), "k", {"text": "planted"})
+        self.assertEqual(state.get_item("alice", ("alice", "notes"), "k")["value"]["text"],
+                         "planted")
 
 
 class NamespaceBoundary(unittest.TestCase):
