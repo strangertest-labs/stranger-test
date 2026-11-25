@@ -411,6 +411,140 @@ def _confirm_print(rep, as_json: bool) -> None:
         print(rep.summary())
 
 
+# Short, legible labels for the compact demo summary (display only; the VERDICT
+# line and --json still use the fixture keys).
+_DEMO_LABELS = {
+    "prefixbug": "prefix-id bug",
+    "dotbug": "dot-id bug",
+    "separatorbug": "separator-id bug",
+    "wildcardbug": "wildcard-id bug",
+    "casebug": "case-id bug",
+    "whitespacebug": "whitespace-id bug",
+    "writeleak": "write-path leak",
+}
+
+
+def _demo_label(key: str) -> str:
+    return _DEMO_LABELS.get(key, key.replace("_", " "))
+
+
+def _demo_drivers(rep) -> str:
+    """The path(s) that drove a report's grade, for the one-line summary."""
+    from .deep_tests import _LEAK_GRADES
+
+    paths = getattr(rep, "paths", None) or []
+    names = [p["name"] for p in paths if p.get("outcome") in _LEAK_GRADES]
+    return f" ({', '.join(names)})" if names else ""
+
+
+# Per-test guidance for running against a real target. This is the single source
+# for the post-demo "run against your own server" block (Fix ②) and the per-test
+# --help / epilog guidance (Fix ③). It reuses what already exists elsewhere: the
+# URL shapes come from the `url` positional help (agent-memory wants a LangGraph
+# base URL, semantic-cache a cache/gateway base URL, the rest an MCP endpoint),
+# the doc links from the docs/ files, and the invocation form from
+# deep_tests.confirm_hint. A test absent here falls back to the generic MCP
+# endpoint and the three universal flags; a lab-only test (run_target is None)
+# shows its target_note instead of a target command.
+_DEFAULT_TARGET_URL = "http://127.0.0.1:PORT/mcp"
+_UNIVERSAL_FLAGS = ("--demo", "--token-a", "--token-b")
+_TEST_HELP = {
+    "state-handle": {"url": _DEFAULT_TARGET_URL},
+    "tasks-idor": {"url": _DEFAULT_TARGET_URL},
+    "elicitation": {"url": _DEFAULT_TARGET_URL},
+    "agent-memory": {
+        "url": "http://127.0.0.1:2024",
+        "flags": _UNIVERSAL_FLAGS + ("--namespace-a", "--write-paths"),
+        "note": "two users' bearer tokens for a LangGraph server you run or are "
+                "authorized to test",
+        "doc": "docs/AGENT-MEMORY.md",
+    },
+    "semantic-cache": {
+        "url": "http://127.0.0.1:8000",
+        "flags": _UNIVERSAL_FLAGS + ("--cache-mode", "--identity-as", "--edge-cases"),
+        "note": "two caller identities for a cache or LLM gateway you run or are "
+                "authorized to test",
+        "doc": "docs/CACHE.md",
+    },
+}
+
+
+def _target_example(t) -> str:
+    """The real-target command line for a test (matches confirm_hint's form)."""
+    url = _TEST_HELP.get(t.id, {}).get("url", _DEFAULT_TARGET_URL)
+    return f"stranger-test confirm {t.id} {url} --token-a <A> --token-b <B>"
+
+
+def _print_run_against_your_own(t) -> None:
+    """Fix ②: after a --demo run, tell a newcomer how to run the real thing.
+
+    Three lines at most, tailored to the test just demoed. For a lab-only test
+    (no real target) we point at its target_note instead of a target command.
+    """
+    meta = _TEST_HELP.get(t.id, {})
+    print("\nTo run this against your own server:")
+    if t.run_target is None:
+        note = getattr(t, "target_note", "") or "lab-only test; run it with --demo."
+        print(f"  {note}")
+        return
+    print(f"  {_target_example(t)}")
+    note, doc = meta.get("note"), meta.get("doc")
+    if note and doc:
+        print(f"  ({note}; see {doc})")
+    elif note:
+        print(f"  ({note})")
+    elif doc:
+        print(f"  (see {doc})")
+
+
+def _test_help_block(t) -> str:
+    """One curated help block for a test: the demo command, the real-target
+    command (unless lab-only), and the handful of flags that matter for it."""
+    meta = _TEST_HELP.get(t.id, {})
+    lab = t.run_target is None
+    tag = "   [lab only: use --demo]" if lab else ""
+    lines = [f"{t.id} — {t.title}{tag}",
+             f"    demo:    stranger-test confirm {t.id} --demo"]
+    if not lab:
+        lines.append(f"    target:  {_target_example(t)}")
+    flags = ("--demo",) if lab else meta.get("flags", _UNIVERSAL_FLAGS)
+    doc = meta.get("doc")
+    tail = f"   (see {doc})" if doc else ""
+    lines.append(f"    flags:   {' '.join(flags)}{tail}")
+    return "\n".join(lines)
+
+
+def _confirm_epilog() -> str:
+    """Fix ③ (confirm --help): a per-test quickstart under the flag reference."""
+    from . import deep_tests as dt
+
+    lines = ["", "per-test quickstart (the flags that matter for each test):", ""]
+    for t in dt.DEEP_TESTS.values():
+        lines.append(_test_help_block(t))
+        lines.append("")
+    lines.append("`confirm <test> --help` prints that one test's block first, "
+                 "above this full flag list.")
+    return "\n".join(lines)
+
+
+def _maybe_print_confirm_test_help(argv) -> None:
+    """Fix ③ (confirm <test> --help): print that test's curated block above
+    argparse's full help, so the few flags that matter are visible without
+    scrolling the whole flag list. A no-op for anything that is not
+    `confirm <known-test> ... --help`; argparse still prints its complete help.
+    """
+    if not argv or argv[0] != "confirm" or not ("-h" in argv or "--help" in argv):
+        return
+    from . import deep_tests as dt
+
+    test_id = next((a for a in argv[1:] if not a.startswith("-")), None)
+    t = dt.get(test_id) if test_id else None
+    if t is None:
+        return
+    print(_test_help_block(t))
+    print()
+
+
 def cmd_confirm(args: argparse.Namespace) -> int:
     """Tier-2: confirm a cross-user leak with a two-identity lab run."""
     from . import deep_tests as dt
@@ -432,6 +566,10 @@ def cmd_confirm(args: argparse.Namespace) -> int:
     if getattr(args, "demo", False):
         res = t.demo()
         leaky, safe = res["leaky"], res["safe"]
+        # --full (and --json) keep today's complete output: every scenario in
+        # full. The default is compact — the two headline scenarios in full, the
+        # rest one line each. Every scenario still RUNS either way (see VERDICT).
+        compact = not getattr(args, "full", False) and not args.json
         print(f"== {t.title} — demo (bundled loopback fixtures) ==\n")
         print("-- against a KNOWN-LEAKY server (the test must catch it):")
         _confirm_print(leaky, args.json)
@@ -439,13 +577,25 @@ def cmd_confirm(args: argparse.Namespace) -> int:
         _confirm_print(safe, args.json)
         works = dt.leaked(leaky) and str(getattr(safe, "grade", "")) == "OK"
         seen = [f"leaky -> {dt._grade_of(leaky)}", f"safe -> {dt._grade_of(safe)}"]
-        for key, what, expected in getattr(t, "demo_extra", ()):
-            print(f"\n-- against {what}:")
-            _confirm_print(res[key], args.json)
-            works = works and dt._grade_of(res[key]) == expected
-            seen.append(f"{key.replace('_', ' ')} -> {dt._grade_of(res[key])}")
+        extra = list(getattr(t, "demo_extra", ()))
+        if extra and compact:
+            print("\n-- the remaining scenarios (each still run; --full shows them in full):")
+        for key, what, expected in extra:
+            rep = res[key]
+            grade = dt._grade_of(rep)
+            if compact:
+                print(f"  {_demo_label(key):<20}-> {grade}{_demo_drivers(rep)}")
+            else:
+                print(f"\n-- against {what}:")
+                _confirm_print(rep, args.json)
+            works = works and grade == expected
+            seen.append(f"{key.replace('_', ' ')} -> {grade}")
         print(f"\nVERDICT: the test {'WORKS' if works else 'did NOT behave as expected'} "
               f"({', '.join(seen)}).")
+        if compact:
+            print("Pass --full to print every scenario in full (all 9 scenarios, every path).")
+        if not args.json:
+            _print_run_against_your_own(t)
         return 0 if works else 2
 
     if not args.url:
@@ -632,12 +782,18 @@ def build_parser() -> argparse.ArgumentParser:
             "fixtures (no target or credentials). Otherwise give a URL and two bearer "
             "tokens for a server you are authorized to test. `confirm --list` lists the tests."
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_confirm_epilog(),
     )
     confirm.add_argument("test", nargs="?", help="which test (see --list)")
     confirm.add_argument("url", nargs="?", default=None, help="server URL for real-target mode: the MCP endpoint, or for "
                               "agent-memory the agent server's base URL (e.g. http://127.0.0.1:2024), "
                               "or for semantic-cache the cache's or gateway's base URL")
     confirm.add_argument("--demo", action="store_true", help="run against bundled loopback fixtures")
+    confirm.add_argument("--full", action="store_true",
+                         help="with --demo, print every scenario in full (the default shows the "
+                              "two headline scenarios in full and the rest one line each); "
+                              "no effect on a real-target run")
     confirm.add_argument("--list", action="store_true", help="list the deep tests")
     confirm.add_argument("--token-a", dest="token_a", default=None, help="bearer token for identity A")
     confirm.add_argument("--token-b", dest="token_b", default=None, help="bearer token for identity B")
@@ -766,9 +922,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    effective = list(argv) if argv is not None else list(sys.argv[1:])
+    _maybe_print_confirm_test_help(effective)
     parser = build_parser()
     args = parser.parse_args(argv)
-    args._argv = list(argv) if argv is not None else list(sys.argv[1:])
+    args._argv = effective
     func = getattr(args, "func", None)
     if func is None:
         parser.print_help(sys.stderr)

@@ -13,6 +13,12 @@ version, the MCP SDK version, the licence field and the sha256 of the installed
 dist-info `RECORD` in every run. Configured by its config file only; no source
 changes. No licence key, no database, no model-provider keys.
 
+**Other versions (release watcher only).** The pin is the default. With
+`ST_ALLOW_ANY_VERSION=1` in the environment the driver records the installed
+version (`version_pin` in the saved run) and runs anyway; nothing about the
+checks or their grading changes. A release watcher sets it to run this gate
+against each new LiteLLM release.
+
 Driver: `integration/xid10_litellm_gate.py`. Configs: `integration/litellm/`.
 Sample runs: `integration/sample-runs/litellm-*.json`.
 

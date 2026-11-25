@@ -321,6 +321,64 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(res["prefixbug"].grade, LEAK)
         self.assertEqual(outcomes(res["prefixbug"])["store_search_own_prefix"], "LEAK")
 
+    def test_demo_default_is_compact_but_runs_every_scenario(self):
+        # Default demo: the two headline scenarios in full, the rest one line
+        # each. Every scenario still runs, so the VERDICT names all nine.
+        code, out, _ = _cli(["confirm", "agent-memory", "--demo"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("VERDICT: the test WORKS", out)
+        for key in ("leaky", "safe", "prefixbug", "dotbug", "separatorbug",
+                    "wildcardbug", "casebug", "whitespacebug", "writeleak"):
+            self.assertIn(f"{key} -> ", out)
+        # The remaining scenarios are one compact line each, not full breakdowns.
+        self.assertIn("prefix-id bug", out)
+        self.assertIn("-> LEAK (store_search_own_prefix)", out)
+        self.assertNotIn("-- against a store with the prefix id bug", out)
+        self.assertIn("--full", out)
+        full_code, full_out, _ = _cli(["confirm", "agent-memory", "--demo", "--full"])
+        self.assertLess(len(out.splitlines()), len(full_out.splitlines()))
+
+    def test_demo_full_prints_every_scenario_in_full(self):
+        # --full reproduces the complete per-path output for all nine scenarios.
+        code, out, _ = _cli(["confirm", "agent-memory", "--demo", "--full"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("VERDICT: the test WORKS", out)
+        self.assertIn("-- against a store with the prefix id bug", out)
+        self.assertIn("-- against a server that checks reads but not writes", out)
+        self.assertNotIn("Pass --full", out)
+
+    def test_demo_prints_tailored_run_against_your_own_block(self):
+        # Fix ②: after a --demo run, a next-step block tells the newcomer how to
+        # run it against their own server, tailored to the test just demoed.
+        _, out, _ = _cli(["confirm", "agent-memory", "--demo"])
+        self.assertIn("To run this against your own server:", out)
+        self.assertIn(
+            "stranger-test confirm agent-memory http://127.0.0.1:2024 "
+            "--token-a <A> --token-b <B>", out)
+        self.assertIn("docs/AGENT-MEMORY.md", out)
+        # Not hardcoded to agent-memory: another test gets its own target/URL.
+        _, cache_out, _ = _cli(["confirm", "semantic-cache", "--demo"])
+        self.assertIn("confirm semantic-cache http://127.0.0.1:8000", cache_out)
+        self.assertNotIn("http://127.0.0.1:2024", cache_out)
+
+    def test_demo_json_omits_the_next_step_block(self):
+        # Fix ②: the block is human-output only; --json stays machine-clean.
+        _, out, _ = _cli(["confirm", "agent-memory", "--demo", "--json"])
+        self.assertNotIn("To run this against your own server:", out)
+
+    def test_per_test_help_surfaces_the_curated_block_first(self):
+        # Fix ③: `confirm <test> --help` shows that test's demo/target/key-flags
+        # block above argparse's full flag list. (argparse's --help exits.)
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main(["confirm", "agent-memory", "--help"])
+        text = out.getvalue()
+        head = text.splitlines()[:6]
+        self.assertTrue(any("agent-memory — " in line for line in head), text)
+        self.assertTrue(any("--namespace-a" in line for line in head), text)
+        self.assertIn("usage: strangertest confirm", text)  # full help still printed
+
     def test_listed(self):
         code, out, _ = _cli(["confirm", "--list"])
         self.assertEqual(code, 0)

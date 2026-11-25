@@ -628,7 +628,7 @@ class CommandLine(unittest.TestCase):
                 self.assertNotIn("sk-secret-value", out + err)
 
     def test_demo_shows_the_new_cases(self):
-        code, out, _ = _cli(["confirm", "semantic-cache", "--demo"])
+        code, out, _ = _cli(["confirm", "semantic-cache", "--demo", "--full"])
         self.assertEqual(code, 0, out)
         self.assertIn("VERDICT: the test WORKS", out)
         for line in ("LEAK           edge_dot", "LEAK           edge_separator",

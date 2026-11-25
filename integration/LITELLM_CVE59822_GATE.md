@@ -14,6 +14,12 @@ driver refuses to run against a version below 1.84.0. It records no exploit or
 bypass steps — only what a patched server rejects. Loopback only; the master key
 and the forged JWT are stored as `sha256:` fingerprints.
 
+**Other fixed versions (release watcher only).** By default the driver runs only
+the validated versions above. With `ST_ALLOW_ANY_VERSION=1` it records the
+installed version (`version_pin` in the saved run) and runs on any version
+`>= 1.84.0`; the refusal below 1.84.0 is never lifted, and the checks and their
+grading are unchanged. A release watcher sets it.
+
 ## What the fix does
 
 PR #26463 tightened `MCPRequestHandler.process_mcp_request`. Before the fix, an

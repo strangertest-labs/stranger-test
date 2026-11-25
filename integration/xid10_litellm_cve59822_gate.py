@@ -72,6 +72,7 @@ from xid10_litellm_gate import (  # noqa: E402
     FORBIDDEN_PORTS, PORT_RANGE, UPSTREAM_VERSION, LiteLLM, _HTTP4, fp, http_status,
     litellm_versions, redact, save,
 )
+from version_pin import check_version_pin  # noqa: E402
 
 CVE = "CVE-2026-59822"
 ADVISORY = "https://github.com/BerriAI/litellm/security/advisories/GHSA-7488-6r32-c95q"
@@ -278,9 +279,13 @@ def main():
     if _version_tuple(ver) < FIRST_FIXED:
         raise SystemExit(f"REFUSING: LiteLLM {ver} is an AFFECTED version (< 1.84.0). This gate "
                          f"tests the FIX only and never installs or runs an affected version.")
-    if ver not in VALIDATED_FIXED:
-        raise SystemExit(f"ERROR: this gate is validated for fixed versions {sorted(VALIDATED_FIXED)}; "
-                         f"got {ver}. Add it to VALIDATED_FIXED only after confirming it is >= 1.84.0.")
+    # Validated versions only, by default. ST_ALLOW_ANY_VERSION=1 (the release
+    # watcher) records the installed version and runs anyway. The refusal above
+    # for an AFFECTED version (< 1.84.0) is never lifted.
+    version_pin = check_version_pin(
+        ver, VALIDATED_FIXED,
+        f"ERROR: this gate is validated for fixed versions {sorted(VALIDATED_FIXED)}; "
+        f"got {ver}. Add it to VALIDATED_FIXED only after confirming it is >= 1.84.0.")
 
     up = MinimalUpstream(up_port).start()
     fx = FailOpenDeputy(fx_port).start()
@@ -338,6 +343,7 @@ def main():
             "probe": "litellm-cve59822-inbound-auth",
             "scope": "patched behaviour only; no affected (< 1.84.0) version installed or run",
             "gateway": "litellm", "gateway_version": ver, "gateway_versions": versions,
+            "version_pin": version_pin,
             "first_fixed_version": "1.84.0",
             "install": f"pip litellm[proxy]=={ver} in a throwaway python3.11 venv (open-source "
                        "build, no licence key, no database)",

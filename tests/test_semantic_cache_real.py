@@ -543,7 +543,7 @@ class CommandLine(unittest.TestCase):
                 self.assertIn("error:", err)
 
     def test_demo_shows_both_shapes(self):
-        code, out, _ = _cli(["confirm", "semantic-cache", "--demo"])
+        code, out, _ = _cli(["confirm", "semantic-cache", "--demo", "--full"])
         self.assertEqual(code, 0, out)
         self.assertIn("chat-completions shape", out)
         self.assertIn("chat leaky -> LEAK, chat safe -> OK, chat broken -> INCONCLUSIVE", out)

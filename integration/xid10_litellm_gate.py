@@ -78,6 +78,7 @@ from strangertest.concurrency import InflightMixin  # noqa: E402
 from strangertest.mcp_client import MCPClient  # noqa: E402
 from strangertest.probe import Identity, ProbeError  # noqa: E402
 from strangertest.transports import HTTPTransport  # noqa: E402
+from version_pin import check_version_pin  # noqa: E402
 
 PINNED_VERSION = "1.109.1"
 AS_ISSUER = "https://local-as.test"
@@ -1007,9 +1008,12 @@ def main():
     if cfg_key not in CONFIGS:
         raise SystemExit(f"unknown LL_MODE {mode}")
     versions = litellm_versions(ll_bin)
-    if versions["litellm"] != PINNED_VERSION:
-        raise SystemExit(f"ERROR: LiteLLM {versions['litellm']} installed; this gate is pinned "
-                         f"to {PINNED_VERSION}")
+    # Pinned by default. ST_ALLOW_ANY_VERSION=1 (the release watcher) records the
+    # installed version and runs anyway; nothing else about the gate changes.
+    version_pin = check_version_pin(
+        versions["litellm"], (PINNED_VERSION,),
+        f"ERROR: LiteLLM {versions['litellm']} installed; this gate is pinned "
+        f"to {PINNED_VERSION}")
     client_secret = os.environ.get("LL_CLIENT_SECRET") or secrets.token_hex(16)
     facts = login_facts(as_base)
     print(f"=== MODE {cfg_key}  LiteLLM {versions['litellm']} (mcp {versions['mcp']})  AS {facts}")
@@ -1028,7 +1032,8 @@ def main():
     gw = LiteLLM(ll_bin, CONFIGS[cfg_key], ports["litellm"], subs)
     base = {"gateway": "litellm", "gateway_label": "an LLM gateway with MCP features",
             "gateway_version": versions["litellm"], "gateway_versions": versions,
-            "install": f"pip litellm[proxy]=={PINNED_VERSION} in its own venv (open-source build, "
+            "version_pin": version_pin,
+            "install": f"pip litellm[proxy]=={versions['litellm']} in its own venv (open-source build, "
                        "no licence key, no database)",
             "endpoints": {"as_base": as_base, **ports}, "login_server": facts,
             "as_act_from_client": bool(facts.get("act_from_client")),
