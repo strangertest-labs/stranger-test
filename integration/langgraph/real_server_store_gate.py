@@ -52,6 +52,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 from strangertest.agent_memory import run_agent_memory_probe  # noqa: E402
 
 FORBIDDEN_PORTS = {4000, 4444, 8790}
+PORT_WAIT_S = 60
 AGENT = dict(assistant_id="memory",
              save_input={"action": "save", "key": "st-probe", "value": "{marker}"},
              recall_input={"action": "recall", "key": "st-probe"}, whoami_field="whoami")
@@ -102,8 +103,20 @@ def main():
     if not (4600 <= port <= 4699) or port in FORBIDDEN_PORTS:
         print(f"REFUSING: port {port} is outside 4600-4699 or reserved", file=sys.stderr)
         return 2
-    with socket.socket() as check:
-        check.bind(("127.0.0.1", port))
+    # A port the previous gate run just released can stay unavailable for a
+    # short while; wait for it instead of failing the whole run at once.
+    deadline = time.time() + PORT_WAIT_S
+    while True:
+        try:
+            with socket.socket() as check:
+                check.bind(("127.0.0.1", port))
+            break
+        except OSError:
+            if time.time() >= deadline:
+                print(f"REFUSING: port {port} is still in use after {PORT_WAIT_S}s",
+                      file=sys.stderr)
+                return 2
+            time.sleep(2)
 
     kind = os.environ.get("ST_STORE_KIND", "sqlite")
     if kind not in ("sqlite", "postgres"):

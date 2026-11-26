@@ -141,6 +141,8 @@ stranger-test confirm agent-memory http://127.0.0.1:2024 --token-a <A> --token-b
 Guide, with a copy-paste test-user auth snippet: [docs/AGENT-MEMORY.md](docs/AGENT-MEMORY.md).
 Background and results on affected and fixed store versions:
 [docs/LANGGRAPH-MEMORY-ISOLATION.md](docs/LANGGRAPH-MEMORY-ISOLATION.md).
+Results on each new LangGraph server release:
+[docs/LANGGRAPH-RELEASE-CHECKS.md](docs/LANGGRAPH-RELEASE-CHECKS.md).
 
 `semantic-cache` needs a running cache or gateway and two test users' ids or
 keys:
@@ -189,6 +191,44 @@ correctly-scoped server clean. `demo` exits **0** when the contrast holds (leaky
 leaks **and** safe does not) — so a printed `LEAK` with exit `0` is the demo
 working, not a finding against you. Other probes: `python3 -m strangertest demo
 --probe {cache,handle,cachescope}`.
+
+## Run it on every release (CI)
+
+A leak between users usually arrives with a change: a new handler, a dependency
+upgrade, a refactor of the auth code. So the check is most useful as a build
+step. Your job starts the server on the runner's loopback with two test
+accounts, and the step fails on `LEAK`.
+
+For a LangGraph server, with the GitHub Action:
+
+```yaml
+- uses: strangertest-labs/stranger-test@v0.4
+  with:
+    mode: confirm
+    test: agent-memory
+    url: http://127.0.0.1:2024
+    token-a: ${{ secrets.AGENT_TEST_TOKEN_A }}
+    token-b: ${{ secrets.AGENT_TEST_TOKEN_B }}
+    namespace-a: alice.notes      # a Store namespace user A may write to
+```
+
+Or in any CI system, as a plain command:
+
+```bash
+pip install stranger-test
+stranger-test confirm agent-memory http://127.0.0.1:2024 \
+  --token-a "$A" --token-b "$B" --namespace-a alice.notes --write-paths
+```
+
+Exit codes: `0` OK, `1` leak, `2` inconclusive, `3` usage error or refused
+target. `--write-paths` adds the update, delete and owner-field paths; it
+writes throwaway objects, so use a test server. The same pattern works for an
+MCP server (`state-handle`, `tasks-idor`, `elicitation`) and a response cache
+(`semantic-cache`): see [docs/CI.md](docs/CI.md).
+
+The same check is run against each new LangGraph server release with a sample
+app; the results are in
+[docs/LANGGRAPH-RELEASE-CHECKS.md](docs/LANGGRAPH-RELEASE-CHECKS.md).
 
 ## How it works
 
@@ -269,7 +309,33 @@ permitted the test. There is deliberately no "scan everything" mode: one target,
 one authorization. Any real finding is for **private, responsible disclosure**
 to the server's owner. Do not name-and-shame.
 
-## What's new in 0.4.2
+## What's new in 0.4.6
+
+- **Run it on every release.** A CI section above, and a
+  [page of results](docs/LANGGRAPH-RELEASE-CHECKS.md) from running the
+  agent-memory check against each new LangGraph server release.
+- `docs/CI.md` now pins the action at `@v0.4`. The `@v0.3` it named before
+  does not have the `semantic-cache` test.
+- The LangGraph server gate waits up to a minute for its port to be free
+  before it gives up. No change to any test.
+
+### 0.4.5
+
+- **`agent_recall_steps`**: a new agent-memory path. It reads every step of
+  user B's run (the stream, the state and the history), not only the final
+  answer, so data that one step wrote to the graph's state and a later step
+  removed is still seen. See [docs/AGENT-MEMORY.md](docs/AGENT-MEMORY.md).
+
+### 0.4.3 and 0.4.4
+
+- **Owner-field paths** (`owner_in_body_thread_create`,
+  `owner_in_body_store_put`, with `--write-paths`): catch a handler that takes
+  the owner from the request body instead of from the signed-in user.
+- **A short evidence summary** (`--evidence-summary`) beside the full evidence
+  page.
+- Shorter `--demo` output and clearer first-run guidance.
+
+### 0.4.2
 
 - **The evidence page names the nearest SOC 2 criterion.** CC6.1 is listed with
   the plain statement that no Trust Services Criterion names tenant

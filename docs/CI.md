@@ -8,7 +8,7 @@ on the runner's loopback, with test accounts. Nothing leaves the runner.
 Start your MCP server in the job, then:
 
 ```yaml
-- uses: strangertest-labs/stranger-test@v0.3
+- uses: strangertest-labs/stranger-test@v0.4
   with:
     url: http://127.0.0.1:8080/mcp
 ```
@@ -19,7 +19,7 @@ cannot be reached (nothing was scanned, so it is not a pass).
 To see the signals in the repository's code-scanning tab:
 
 ```yaml
-- uses: strangertest-labs/stranger-test@v0.3
+- uses: strangertest-labs/stranger-test@v0.4
   with:
     url: http://127.0.0.1:8080/mcp
     sarif-file: stranger-test.sarif
@@ -35,7 +35,7 @@ This is the cross-user check. It needs two test accounts on the server under
 test, each with its own bearer token:
 
 ```yaml
-- uses: strangertest-labs/stranger-test@v0.3
+- uses: strangertest-labs/stranger-test@v0.4
   with:
     mode: confirm
     test: state-handle        # or tasks-idor, elicitation
@@ -55,7 +55,7 @@ read memory stored for another (an agent memory spill)? Give the server's base
 URL, not an MCP path. Two tokens are enough to test the thread and Store paths:
 
 ```yaml
-- uses: strangertest-labs/stranger-test@v0.3
+- uses: strangertest-labs/stranger-test@v0.4
   with:
     mode: confirm
     test: agent-memory
@@ -76,6 +76,12 @@ To also test through the agent, add your graph's id and inputs:
 `{marker}` is replaced by the test's own marker. See
 [AGENT-MEMORY.md](AGENT-MEMORY.md) for every option and how to read the result.
 
+The action does not turn on the write paths or the awkward-id cases. For those,
+run the command directly (see "Without the action" below) with `--write-paths`
+and `--edge-identity`. What the check reports on each new LangGraph server
+release, with a sample app, is in
+[LANGGRAPH-RELEASE-CHECKS.md](LANGGRAPH-RELEASE-CHECKS.md).
+
 ## 4. Semantic cache (response caches and LLM gateways)
 
 `semantic-cache` checks a response cache: can one user get an answer that was
@@ -83,7 +89,7 @@ cached for another? Give the cache's or gateway's base URL. For an LLM gateway
 that caches chat completions, with one API key per test user:
 
 ```yaml
-- uses: strangertest-labs/stranger-test@v0.3
+- uses: strangertest-labs/stranger-test@v0.4
   with:
     mode: confirm
     test: semantic-cache
@@ -98,7 +104,7 @@ For a cache with its own store and query calls that tells tenants apart by a
 header:
 
 ```yaml
-- uses: strangertest-labs/stranger-test@v0.3
+- uses: strangertest-labs/stranger-test@v0.4
   with:
     mode: confirm
     test: semantic-cache
