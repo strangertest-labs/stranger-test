@@ -11,7 +11,8 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
 from strangertest import deep_tests as dt
 from strangertest.agent_memory import (
-    EDGE_PATHS, INCONCLUSIVE, LEAK, OBSERVATION, OK, WRITE_PATHS, run_agent_memory_probe,
+    EDGE_PATHS, INCONCLUSIVE, LEAK, OBSERVATION, OK, WRITE_PATHS, _event_origin, _parse_sse,
+    run_agent_memory_probe,
 )
 from strangertest.cli import main
 from strangertest.guard import AuthorizationError
@@ -58,7 +59,7 @@ class Grades(unittest.TestCase):
         self.assertEqual(got.pop("owner_in_body_thread_create"), "NOT_RUN")
         self.assertEqual(got.pop("owner_in_body_store_put"), "NOT_RUN")
         self.assertEqual(set(got.values()), {"LEAK"}, report.summary())
-        self.assertEqual(len(report.paths), 20)
+        self.assertEqual(len(report.paths), 21)
 
     def test_safe_server_is_ok(self):
         report = probe("safe")
@@ -104,6 +105,112 @@ class Grades(unittest.TestCase):
         report = probe("leaky", whoami_field="key")
         self.assertEqual(report.grade, OBSERVATION, report.summary())
         self.assertIn("same identity", report.detail)
+
+
+class RecallSteps(unittest.TestCase):
+    """``agent_recall_steps``: what each node of B's run wrote, not only the
+    run's final state. One test per row of the case table in the design note."""
+
+    def steps(self, mode, assistant="memory", **overrides):
+        report = probe(mode, assistant_id=assistant, **overrides)
+        return report, {p["name"]: p for p in report.paths}
+
+    def test_marker_in_the_final_state_is_a_leak_on_both_recall_paths(self):
+        report, paths = self.steps("leaky")
+        self.assertEqual(paths["agent_recall"]["outcome"], "LEAK")
+        self.assertEqual(paths["agent_recall_steps"]["outcome"], "LEAK")
+        self.assertTrue(report.controls["a_agent_steps_sees_marker"])
+
+    def test_marker_in_a_middle_step_only_is_caught_by_the_steps_path(self):
+        # ``retrieval`` clears what it fetched before the run ends. The final
+        # state shows nothing even to A, so the older path cannot be exercised.
+        report, paths = self.steps("leaky", "retrieval")
+        self.assertEqual(paths["agent_recall"]["outcome"], "NOT_EXERCISED")
+        self.assertEqual(paths["agent_recall_steps"]["outcome"], "LEAK")
+        self.assertIn("node 'retrieve'", paths["agent_recall_steps"]["note"])
+        self.assertIn("stream", paths["agent_recall_steps"]["note"])
+        self.assertEqual(report.grade, LEAK)
+
+    def test_marker_hidden_by_an_output_schema_is_caught(self):
+        report, paths = self.steps("leaky", "retrieval_hidden")
+        self.assertEqual(paths["agent_recall"]["outcome"], "NOT_EXERCISED")
+        self.assertEqual(paths["agent_recall_steps"]["outcome"], "LEAK")
+        self.assertIn("state", paths["agent_recall_steps"]["note"])
+
+    def test_without_a_stream_the_thread_state_still_grades_the_path(self):
+        report, paths = self.steps("nostream", "retrieval_hidden")
+        self.assertEqual(paths["agent_recall_steps"]["outcome"], "LEAK")
+        self.assertNotIn("stream", report.controls["agent_steps_sources"])
+        self.assertIn("the thread's state", paths["agent_recall_steps"]["note"])
+
+    def test_without_a_stream_a_cleared_step_cannot_be_exercised(self):
+        # Nothing readable ever held the marker, so "B saw nothing" proves nothing.
+        report, paths = self.steps("nostream", "retrieval")
+        self.assertEqual(paths["agent_recall_steps"]["outcome"], "NOT_EXERCISED")
+        self.assertFalse(report.controls["a_agent_steps_sees_marker"])
+
+    def test_no_stream_and_no_state_is_not_run(self):
+        report, paths = self.steps("nosteps")
+        self.assertEqual(paths["agent_recall_steps"]["outcome"], "NOT_RUN")
+        self.assertEqual(report.controls["agent_steps_sources"], [])
+
+    def test_a_run_that_never_shows_a_her_own_marker_is_not_exercised(self):
+        report, paths = self.steps("broken")
+        self.assertEqual(paths["agent_recall_steps"]["outcome"], "NOT_EXERCISED")
+        self.assertNotEqual(report.grade, OK)
+
+    def test_per_user_retrieval_is_ok_and_says_what_it_cannot_see(self):
+        for assistant in ("retrieval", "retrieval_hidden"):
+            with self.subTest(assistant=assistant):
+                report, paths = self.steps("safe", assistant)
+                self.assertEqual(paths["agent_recall_steps"]["outcome"], "OK", report.summary())
+                self.assertIn("not visible from outside", paths["agent_recall_steps"]["note"])
+                self.assertEqual(report.grade, OK, report.summary())
+
+    def test_b_run_that_does_not_complete_is_not_exercised_never_ok(self):
+        report, paths = self.steps("aliceruns", "retrieval")
+        self.assertEqual(paths["agent_recall_steps"]["outcome"], "NOT_EXERCISED")
+        self.assertEqual(paths["agent_recall_steps"]["b_status"], 403)
+
+    def test_recall_input_must_not_carry_the_marker(self):
+        report, paths = self.steps("leaky", "retrieval",
+                                   recall_input={"action": "recall", "key": "{marker}"})
+        self.assertEqual(paths["agent_recall_steps"]["outcome"], "NOT_RUN")
+
+    def test_not_run_without_agent_inputs(self):
+        with serving("leaky") as url:
+            report = run_agent_memory_probe(url, A, B, authorized=True)
+        self.assertEqual(outcomes(report)["agent_recall_steps"], "NOT_RUN")
+
+    def test_no_marker_in_the_report_when_a_step_leaks(self):
+        report, _ = self.steps("leaky", "retrieval")
+        text = json.dumps(report.to_dict()) + report.summary()
+        self.assertNotIn("st-mem-", text)
+        self.assertNotIn(A, text)
+        self.assertNotIn(B, text)
+
+
+class StreamReader(unittest.TestCase):
+    def test_events_are_read_in_order_with_their_names(self):
+        text = ("event: metadata\r\ndata: {\"run_id\": \"r\"}\r\n\r\n"
+                ": keep-alive\n\n"
+                "event: updates\ndata: {\"retrieve\": {\"docs\": [\"x\"]}}\n\n"
+                "data: first\ndata: second\n\n"
+                "event: values\ndata:{\"a\": 1}")
+        self.assertEqual(_parse_sse(text), [
+            ("metadata", '{"run_id": "r"}'),
+            ("updates", '{"retrieve": {"docs": ["x"]}}'),
+            ("message", "first\nsecond"),
+            ("values", '{"a": 1}')])
+
+    def test_origin_names_the_node_and_never_the_marker(self):
+        self.assertEqual(_event_origin("updates", '{"retrieve": {"docs": ["M"]}}', "M"),
+                         "node 'retrieve' (updates event)")
+        self.assertEqual(_event_origin("debug|sub:1", '{"payload": {"name": "fetch", "result": "M"}}', "M"),
+                         "node 'fetch' (debug event)")
+        self.assertEqual(_event_origin("values", '{"docs": ["M"]}', "M"), "a values event")
+        self.assertNotIn("M-1", _event_origin("updates", '{"M-1": {"docs": ["M-1"]}}', "M-1"))
+        self.assertEqual(_event_origin("values", "not json M", "M"), "a values event")
 
 
 class OwnerFieldInBody(unittest.TestCase):

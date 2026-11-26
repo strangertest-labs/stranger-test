@@ -178,6 +178,7 @@ _TESTS: Dict[str, Dict[str, Any]] = {
             "store_search_all": "B searches all memory without naming a namespace",
             "store_search_own_prefix": "B searches B's own namespace (ids that share a prefix)",
             "agent_recall": "B asks the agent to recall A's memory",
+            "agent_recall_steps": "B asks the agent, and every step of B's run is checked for A's memory",
             "store_edge_dot": "An identity whose id differs from A's by a dot-separated part searches its own namespace",
             "store_edge_separator": "An identity whose id differs from A's by a separator character searches its own namespace",
             "store_edge_wildcard": "An identity whose id contains a wildcard character searches its own namespace",
@@ -298,6 +299,8 @@ _CHECK_LABELS = {
     "a_agent_save_status": "HTTP status when A saved through the agent",
     "a_store_put_status": "HTTP status when A wrote to the store",
     "a_agent_recall_sees_marker": "A's own recall through the agent returned her marker",
+    "a_agent_steps_sees_marker": "A's marker appeared in a step of A's own run",
+    "agent_steps_sources": "Where a run's steps could be read (stream, state, history)",
     "b_sees_a_namespace_name": "B can see that A's namespace exists",
     # semantic-cache
     "no_identity_status": "HTTP status for a query with no identity",

@@ -13,6 +13,8 @@ LangGraph server with the same code:
     GET  /threads/{id}/history
     POST /threads/search                  {"limit": n}
     POST /threads/{id}/runs/wait          {"assistant_id": ..., "input": {...}}
+    POST /threads/{id}/runs/stream        the same, plus "stream_mode": [...]; answers
+                                          with server-sent events, one group per step
     PUT  /store/items                     {"namespace": [...], "key": k, "value": {...}}
     GET  /store/items?namespace=a.b&key=k
     POST /store/items/search              {"namespace_prefix": [...]}
@@ -21,8 +23,18 @@ LangGraph server with the same code:
     DELETE /threads/{id}
     DELETE /store/items                   {"namespace": [...], "key": k}
 
-The one bundled "agent" (assistant id ``memory``) takes
-``{"action": "save", "key": k, "value": v}`` or ``{"action": "recall", "key": k}``.
+The bundled "agents" all take
+``{"action": "save", "key": k, "value": v}`` or ``{"action": "recall", "key": k}``:
+
+* ``memory`` -- one step; the recalled value is in the answer.
+* ``retrieval`` -- two steps: ``retrieve`` writes what it fetched to ``docs``,
+  ``answer`` clears ``docs``. The final state never holds the fetched text.
+* ``retrieval_hidden`` -- two steps; ``docs`` stays in the thread's state, but
+  the run's answer and its ``updates`` / ``values`` events leave it out (an
+  output schema). The ``debug`` events and the thread state still show it.
+
+As on a LangGraph dev server, a thread's history holds the state after the
+run, not one entry per step.
 
 Callers authenticate with ``Authorization: Bearer tok-<name>``; the identity is
 ``<name>``, percent-decoded, so that a test id can hold a character a header
@@ -60,6 +72,11 @@ cannot carry at its edge (``tok-alice%20`` is the id ``"alice "``). Modes:
   with success and silently dropped.
 * ``nowrites`` -- like ``safe``, but nobody can update or delete anything (405),
   so the write paths' own controls fail.
+* ``nostream`` -- like ``leaky``, but there is no ``runs/stream`` endpoint (404).
+* ``nosteps`` -- like ``leaky``, with no ``runs/stream`` and no readable thread
+  state or history (404), so a run's steps cannot be read at all.
+* ``aliceruns`` -- like ``safe``, but only the user ``alice`` may start a run
+  (403 for anyone else), so a second user's run never completes.
 * ``bodyowner`` -- like ``safe``, but the ownership check trusts an ``owner``
   field the caller supplies in the request body, and a Store write trusts the
   first namespace label the caller sends, instead of the authenticated
@@ -84,11 +101,15 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 MODES = ("leaky", "safe", "meta", "open", "broken", "prefixbug", "dotbug", "separatorbug",
          "wildcardbug", "casebug", "whitespacebug", "strictids", "writeleak", "writeack",
-         "nowrites", "bodyowner")
+         "nowrites", "bodyowner", "nostream", "nosteps", "aliceruns")
 FORBIDDEN_PORTS = {4000, 4444, 8790}
 ASSISTANT_ID = "memory"
+ASSISTANTS = ("memory", "retrieval", "retrieval_hidden")
+# Modes with no per-user scoping at all (one shared memory, every thread readable).
+_UNSCOPED = ("leaky", "open", "nostream", "nosteps")
+_OUTPUT_KEYS = ("result", "whoami")       # what ``retrieval_hidden`` lets out
 
-__all__ = ["MODES", "ASSISTANT_ID", "AgentMemoryState", "build_server", "main"]
+__all__ = ["MODES", "ASSISTANT_ID", "ASSISTANTS", "AgentMemoryState", "build_server", "main"]
 
 
 class _HTTPError(Exception):
@@ -122,7 +143,7 @@ class AgentMemoryState:
 
     @property
     def _owner_scoped(self) -> bool:
-        return self.mode not in ("leaky", "open")
+        return self.mode not in _UNSCOPED
 
     def _canon(self, namespace: Tuple[str, ...]) -> Tuple[str, ...]:
         """The namespace as this mode's Store keys it (the bug modes fold ids together)."""
@@ -181,11 +202,15 @@ class AgentMemoryState:
         return self._thread_view(self._thread_for(user, thread_id))
 
     def get_state(self, user: str, thread_id: str) -> Dict[str, Any]:
+        if self.mode == "nosteps":
+            raise _HTTPError(404, "Not Found")
         thread = self._thread_for(user, thread_id)
         values = {} if self.mode == "broken" else dict(thread["values"])
         return {"values": values, "next": [], "tasks": []}
 
     def get_history(self, user: str, thread_id: str) -> List[Dict[str, Any]]:
+        if self.mode == "nosteps":
+            raise _HTTPError(404, "Not Found")
         thread = self._thread_for(user, thread_id)
         if self.mode == "broken":
             return []
@@ -219,26 +244,79 @@ class AgentMemoryState:
 
     # -- the agent --------------------------------------------------------
 
-    def run(self, user: str, thread_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute(self, user: str, thread_id: str, body: Dict[str, Any]
+                 ) -> Tuple[Dict[str, Any], List[Tuple[str, Dict[str, Any], Dict[str, Any]]], bool]:
+        """Run one agent. Returns the final state, the steps as
+        ``(node, what it wrote, state after it)``, and whether an output schema
+        hides everything but ``_OUTPUT_KEYS``."""
         thread = self._thread_for(user, thread_id)
-        if body.get("assistant_id") != ASSISTANT_ID:
+        if self.mode == "aliceruns" and user != "alice":
+            raise _HTTPError(403, "runs are not enabled for this user")
+        assistant = body.get("assistant_id")
+        if assistant not in ASSISTANTS:
             raise _HTTPError(404, "Thread or assistant not found.")
         state = dict(body.get("input") or {})
-        namespace = ("memories",) if self.mode in ("leaky", "open") else (user, "memories")
+        label = "memories" if assistant == ASSISTANT_ID else "retrieval"
+        namespace = (label,) if self.mode in _UNSCOPED else (user, label)
         namespace = self._canon(namespace)
         key = str(state.get("key"))
-        if state.get("action") == "save":
+        saving = state.get("action") == "save"
+        if saving:
             with self._lock:
                 self.items[(namespace, key)] = {"text": state.get("value")}
-            state["result"] = "saved"
+            found = None
         else:
             item = self.items.get((namespace, key))
-            state["result"] = item.get("text") if item else None
-        state["whoami"] = user
+            found = item.get("text") if item else None
+        steps: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
+
+        def step(node: str, wrote: Dict[str, Any]) -> None:
+            state.update(wrote)
+            steps.append((node, dict(wrote), dict(state)))
+
+        if assistant == ASSISTANT_ID:
+            step("memory", {"result": "saved" if saving else found, "whoami": user})
+        else:
+            docs = [] if found is None else [found]
+            step("retrieve", {"docs": docs, "whoami": user})
+            answer = {"value": None, "result": "answered from %d document(s)" % len(docs)}
+            if assistant == "retrieval":
+                answer["docs"] = []
+            step("answer", answer)
         with self._lock:
-            thread["values"] = state
-            thread["history"].append(state)
-        return {"result": None, "whoami": user} if self.mode == "broken" else dict(state)
+            thread["values"] = dict(state)
+            thread["history"].append(dict(state))
+        return state, steps, assistant == "retrieval_hidden"
+
+    @staticmethod
+    def _visible(values: Dict[str, Any], hidden: bool) -> Dict[str, Any]:
+        return {k: v for k, v in values.items() if k in _OUTPUT_KEYS} if hidden else dict(values)
+
+    def run(self, user: str, thread_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        state, _, hidden = self._execute(user, thread_id, body)
+        if self.mode == "broken":
+            return {"result": None, "whoami": user}
+        return self._visible(state, hidden)
+
+    def run_stream(self, user: str, thread_id: str, body: Dict[str, Any]) -> List[Tuple[str, Any]]:
+        """The run as ``(event name, data)`` pairs, shaped like a LangGraph stream."""
+        if self.mode in ("nostream", "nosteps"):
+            raise _HTTPError(404, "Not Found")
+        modes = body.get("stream_mode") or ["values"]
+        modes = [modes] if isinstance(modes, str) else list(modes)
+        state, steps, hidden = self._execute(user, thread_id, body)
+        events: List[Tuple[str, Any]] = [("metadata", {"run_id": uuid.uuid4().hex, "attempt": 1})]
+        if self.mode == "broken":
+            return events + [("values", {"result": None, "whoami": user})]
+        for number, (node, wrote, after) in enumerate(steps, start=1):
+            if "debug" in modes:
+                events.append(("debug", {"step": number, "type": "task_result",
+                                         "payload": {"name": node, "error": None, "result": wrote}}))
+            if "updates" in modes:
+                events.append(("updates", {node: self._visible(wrote, hidden)}))
+            if "values" in modes:
+                events.append(("values", self._visible(after, hidden)))
+        return events
 
     # -- the Store --------------------------------------------------------
 
@@ -343,6 +421,15 @@ def _make_handler(state: AgentMemoryState):
             if body:
                 self.wfile.write(body)
 
+        def _send_events(self, events: List[Tuple[str, Any]]) -> None:
+            body = "".join("event: %s\ndata: %s\n\n" % (name, json.dumps(data))
+                           for name, data in events).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _body(self) -> Dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0") or "0")
             raw = self.rfile.read(length) if length else b""
@@ -390,6 +477,8 @@ def _make_handler(state: AgentMemoryState):
                 return self._send(204)
             if method == "POST" and len(rest) == 3 and rest[1:] == ["runs", "wait"]:
                 return self._send(200, state.run(user, rest[0], body))
+            if method == "POST" and len(rest) == 3 and rest[1:] == ["runs", "stream"]:
+                return self._send_events(state.run_stream(user, rest[0], body))
             raise _HTTPError(404, "Not Found")
 
         def _store(self, method, rest, user, body, query) -> None:

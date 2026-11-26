@@ -234,6 +234,72 @@ class _Caller:
         except Exception as exc:  # connection refused, timeout, bad URL
             return _Response(0, "", f"{type(exc).__name__}: {exc}")
 
+    def stream(self, path: str, body: Any) -> Tuple[_Response, List[Tuple[str, str]]]:
+        """POST and read a server-sent-event answer to its end (the run's end)."""
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        if self.token is not None:
+            headers["Authorization"] = f"Bearer {self.token}"
+        request = urllib.request.Request(self.base + path, data=json.dumps(body).encode("utf-8"),
+                                         method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                text = response.read(_STREAM_LIMIT).decode("utf-8", "replace")
+                return _Response(response.status, text), _parse_sse(text)
+        except urllib.error.HTTPError as exc:
+            return _Response(exc.code, exc.read().decode("utf-8", "replace")), []
+        except Exception as exc:  # connection refused, timeout, bad URL
+            return _Response(0, "", f"{type(exc).__name__}: {exc}"), []
+
+
+# Stream modes asked of a run. "updates" and "values" are what each node wrote
+# and the state after it; "debug" carries each node's raw result, which also
+# shows fields an output schema leaves out of the other two.
+_STREAM_MODES = ("updates", "values", "debug")
+_STREAM_LIMIT = 16 * 1024 * 1024
+
+
+def _parse_sse(text: str) -> List[Tuple[str, str]]:
+    """Server-sent events as ``(event name, data)`` pairs, in order."""
+    events: List[Tuple[str, str]] = []
+    name, data = "message", []          # type: str, List[str]
+    for raw in text.split("\n"):
+        line = raw.rstrip("\r")
+        if not line.strip():
+            if data:
+                events.append((name, "\n".join(data)))
+            name, data = "message", []
+        elif line.startswith(":"):
+            continue
+        elif line.startswith("event:"):
+            name = line[len("event:"):].strip()
+        elif line.startswith("data:"):
+            value = line[len("data:"):]
+            data.append(value[1:] if value.startswith(" ") else value)
+    if data:
+        events.append((name, "\n".join(data)))
+    return events
+
+
+def _event_origin(name: str, data: str, marker: str) -> str:
+    """Where in a run an event came from, for the note. Never the marker."""
+    try:
+        parsed = json.loads(data)
+    except ValueError:
+        parsed = None
+    node = None
+    if name.split("|")[0] == "updates" and isinstance(parsed, dict):
+        for key, value in parsed.items():
+            if marker in json.dumps(value):
+                node = key
+                break
+    elif name.split("|")[0] == "debug" and isinstance(parsed, dict):
+        payload = parsed.get("payload")
+        if isinstance(payload, dict) and isinstance(payload.get("name"), str):
+            node = payload["name"]
+    if node is not None and marker not in node:
+        return "node %r (%s event)" % (node[:60], name.split("|")[0])
+    return "a %s event" % name.split("|")[0][:20]
+
 
 @dataclass
 class AgentMemoryReport:
@@ -371,7 +437,7 @@ def run_agent_memory_probe(
         # Only name a flag when a path it would enable was actually left NOT_RUN.
         not_run = {p["name"] for p in paths if p["outcome"] == P_NOT_RUN}
         relevant = {}
-        if missing_inputs.get("agent") and not_run & {"thread_state", "thread_history", "agent_recall"}:
+        if missing_inputs.get("agent") and not_run & {"thread_state", "thread_history", "agent_recall", "agent_recall_steps"}:
             relevant["agent"] = missing_inputs["agent"]
         if missing_inputs.get("namespace_b") and "store_search_own_prefix" in not_run:
             relevant["namespace_b"] = missing_inputs["namespace_b"]
@@ -693,6 +759,92 @@ def run_agent_memory_probe(
     else:
         paths.append({"name": recall_name, "what": recall_what,
                       "outcome": P_NOT_RUN, "note": "needs assistant_id, save_input and recall_input"})
+
+    # Through the agent, step by step: what did each node of B's run write?
+    # ``agent_recall`` reads the run's final state. A node can fetch A's data
+    # and a later node can clear it, or an output schema can leave it out, and
+    # the final state is clean. Here the run is streamed and every event is
+    # searched, and B's own thread state and history are read afterwards.
+    steps_name, steps_what = "agent_recall_steps", "B's run fetched A's memory in an intermediate step"
+
+    def observe(caller: _Caller) -> Dict[str, Any]:
+        """One recall run as ``caller`` in a fresh thread of their own, read three ways."""
+        seen: Dict[str, Any] = {"ran": False, "status": 0, "sources": {}, "where": None}
+        made = caller.call("POST", "/threads", {"metadata": {"st_probe": tag}})
+        thread = (made.json() or {}).get("thread_id") if made.status == 200 else None
+        seen["status"] = made.status
+        if not thread:
+            return seen
+        route = f"/threads/{thread}/runs/stream"
+        run_body = {"assistant_id": assistant_id, "input": _fill(recall_input, marker)}
+        response, events = caller.stream(
+            route, dict(run_body, stream_mode=list(_STREAM_MODES), stream_subgraphs=True))
+        if response.status in (400, 422):       # a server that does not know one of the options
+            response, events = caller.stream(route, dict(run_body, stream_mode=["updates", "values"]))
+        steps = [(name, data) for name, data in events if name.split("|")[0] != "metadata"]
+        failed = any(name.split("|")[0] == "error" for name, _ in steps)
+        seen["status"] = response.status
+        if response.status == 200 and steps and not failed:
+            seen["ran"] = True
+            hits = [(name, data) for name, data in steps if marker in data]
+            seen["sources"]["stream"] = bool(hits)
+            if hits:
+                seen["where"] = _event_origin(hits[0][0], hits[0][1], marker)
+        else:                                   # no usable stream: run it the plain way
+            waited = caller.call("POST", f"/threads/{thread}/runs/wait", run_body)
+            seen["status"] = waited.status
+            seen["ran"] = waited.status == 200
+        if seen["ran"]:
+            for source in ("state", "history"):
+                read = caller.call("GET", f"/threads/{thread}/{source}")
+                if read.status == 200:
+                    seen["sources"][source] = marker in read.body
+                    if seen["sources"][source] and not seen["where"]:
+                        seen["where"] = "the thread's " + source
+        return seen
+
+    if not (assistant_id and recall_input is not None and run_planted):
+        paths.append({"name": steps_name, "what": steps_what,
+                      "outcome": P_NOT_RUN, "note": "needs assistant_id, save_input and recall_input"})
+    elif marker in json.dumps(_fill(recall_input, marker)):
+        paths.append({"name": steps_name, "what": steps_what,
+                      "outcome": P_NOT_RUN, "note": "recall_input must not contain {marker}"})
+    else:
+        a_steps = observe(a)
+        proving = sorted(source for source, hit in a_steps["sources"].items() if hit)
+        controls["a_agent_steps_sees_marker"] = bool(proving)
+        controls["agent_steps_sources"] = sorted(a_steps["sources"])
+        if a_steps["ran"] and not a_steps["sources"]:
+            paths.append({"name": steps_name, "what": steps_what, "outcome": P_NOT_RUN,
+                          "note": "the server offers no run stream and no thread state to read"})
+        elif not proving:
+            paths.append({"name": steps_name, "what": steps_what, "outcome": P_NOT_EXERCISED,
+                          "control_status": a_steps["status"],
+                          "note": "A's own marker did not appear in any step of A's own run "
+                                  f"(HTTP {a_steps['status']})"})
+        else:
+            b_steps = observe(b)
+            leaking = sorted(source for source, hit in b_steps["sources"].items() if hit)
+            if not b_steps["ran"]:
+                paths.append({"name": steps_name, "what": steps_what, "outcome": P_NOT_EXERCISED,
+                              "b_status": b_steps["status"],
+                              "note": f"B's own run did not complete (HTTP {b_steps['status']})"})
+            elif leaking:
+                paths.append({"name": steps_name, "what": steps_what, "outcome": P_LEAK,
+                              "b_status": b_steps["status"],
+                              "note": f"A's marker first appeared in {b_steps['where']}; "
+                                      "seen in: " + ", ".join(leaking)})
+            elif not set(proving) & set(b_steps["sources"]):
+                paths.append({"name": steps_name, "what": steps_what, "outcome": P_NOT_EXERCISED,
+                              "b_status": b_steps["status"],
+                              "note": "B's run could not be read the way A's marker was seen ("
+                                      + ", ".join(proving) + ")"})
+            else:
+                paths.append({"name": steps_name, "what": steps_what, "outcome": P_OK,
+                              "b_status": b_steps["status"],
+                              "note": "checked: " + ", ".join(sorted(b_steps["sources"]))
+                                      + ". A node that fetches data and writes none of it to "
+                                        "state is not visible from outside"})
 
     # Existence only: can B see that A's namespace exists?
     listing = b.call("POST", "/store/namespaces", {"limit": 100})

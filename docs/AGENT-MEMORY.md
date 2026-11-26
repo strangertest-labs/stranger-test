@@ -52,7 +52,8 @@ alone:
 | `store_search_all` | search the whole Store with no namespace |
 
 These are reported `NOT_RUN`, because they need more input from you (section 4):
-`thread_state`, `thread_history`, `agent_recall`, `store_search_own_prefix`, the
+`thread_state`, `thread_history`, `agent_recall`, `agent_recall_steps`,
+`store_search_own_prefix`, the
 awkward-id cases (`store_edge_...`) and the four write paths. The last line of
 the output names the flags that would turn them on.
 
@@ -141,7 +142,17 @@ own code chooses the namespace, so make sure it includes the user there too.
   `--save-input` is a JSON run input that makes your agent save something; the
   test replaces `{marker}` in it with its own unique marker. `--recall-input` is
   a JSON run input that makes your agent recall it, and must not contain
-  `{marker}`. This turns on `thread_state`, `thread_history` and `agent_recall`.
+  `{marker}`. This turns on `thread_state`, `thread_history`, `agent_recall` and
+  `agent_recall_steps`.
+
+  `agent_recall` looks at the final state of B's run. `agent_recall_steps`
+  looks at every step: it streams B's run (`stream_mode` `updates`, `values`
+  and `debug`) and then reads B's own thread state and history, and reports
+  `LEAK` if A's marker shows up anywhere. That catches a retrieval node that
+  fetches A's documents when a later node clears them, or when an output schema
+  leaves them out of the answer. The note names the node where the marker first
+  appeared. If A's own run never shows her marker in any step, the path is
+  `NOT_EXERCISED`, not `OK`.
 - `--whoami-field` names a field in your agent's run output that carries the
   caller's identity, if your app has one. The test uses it to make sure the two
   tokens really are two different users.
@@ -328,6 +339,11 @@ Add `--json` for the full report. Tokens and markers appear only as short
   not read your code, and it cannot see data paths that never go through that
   API.
 - There is no semantic-search leak test yet.
+- `agent_recall_steps` sees what a node wrote to the graph's state. A node that
+  fetches another user's documents, uses them and writes none of it to state is
+  not visible from outside. Assert on your retriever's output in your own
+  tests as well. The marker is a random string, so a retriever that ranks by
+  similarity may never fetch it; the path then reads `NOT_EXERCISED`.
 - Only test servers you run or are authorized to test. Anything that is not on
   localhost is refused unless you pass `--allow-nonloopback`.
 - The awkward-id cases only cover the Store, and only the id shapes you supply

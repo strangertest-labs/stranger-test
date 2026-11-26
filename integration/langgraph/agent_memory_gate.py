@@ -3,7 +3,9 @@
 Starts ``langgraph dev`` on 127.0.0.1 with the sample app in ``app/`` (a no-LLM
 agent with long-term memory) in leaky and then safe mode, runs
 ``strangertest.agent_memory`` against each as two identities, and always stops
-the server. LangGraph lives in a separate environment; this script and the probe
+the server. In the same server it then runs the probe against the two retrieval
+graphs in ``app/retrieval.py``, whose fetched documents never reach the run's
+final answer, and checks the ``agent_recall_steps`` path alone. LangGraph lives in a separate environment; this script and the probe
 use the standard library only.
 
 Required:
@@ -12,8 +14,9 @@ Required:
 Optional:
   ST_GATE_PORT_BASE   first of two loopback ports in 4600-4699 (default 4640)
 
-Exit: 0 when the leaky app grades LEAK and the safe app grades OK, 1 otherwise,
-2 when the gate could not run.
+Exit: 0 when the leaky app grades LEAK and the safe app grades OK, and
+``agent_recall_steps`` is LEAK (leaky) and OK (safe) on both retrieval graphs;
+1 otherwise; 2 when the gate could not run.
 """
 
 import json
@@ -40,6 +43,7 @@ AGENT = {
     "whoami_field": "whoami",
     "namespace_a": ["alice", "notes"],
 }
+RETRIEVAL_GRAPHS = ("retrieval", "retrieval_hidden")
 
 
 def _ready(base: str) -> bool:
@@ -74,7 +78,18 @@ def run_mode(mode: str, port: int, langgraph_bin: str, scratch: str) -> dict:
         else:
             raise RuntimeError("the server never became ready")
         report = run_agent_memory_probe(base, TOKENS[0], TOKENS[1], authorized=True, **AGENT)
-        return report.to_dict()
+        result = report.to_dict()
+        result["retrieval_graphs"] = {}
+        for graph in RETRIEVAL_GRAPHS:
+            steps = run_agent_memory_probe(base, TOKENS[0], TOKENS[1], authorized=True,
+                                           **dict(AGENT, assistant_id=graph)).to_dict()
+            by_name = {p["name"]: p for p in steps["paths"]}
+            result["retrieval_graphs"][graph] = {
+                "agent_recall": by_name["agent_recall"]["outcome"],
+                "agent_recall_steps": by_name["agent_recall_steps"]["outcome"],
+                "note": by_name["agent_recall_steps"].get("note"),
+                "sources": steps["controls"].get("agent_steps_sources")}
+        return result
     finally:
         try:
             os.killpg(proc.pid, signal.SIGTERM)
@@ -115,6 +130,11 @@ def main() -> int:
         json.dump({"gate": "agent-memory", "server": version, "results": results}, handle, indent=2)
     print(f"saved: {out}")
     held = results["leaky"]["grade"] == LEAK and results["safe"]["grade"] == OK
+    for mode, wanted in (("leaky", "LEAK"), ("safe", "OK")):
+        for graph, got in results[mode]["retrieval_graphs"].items():
+            print(f"[{mode}] {graph}: agent_recall {got['agent_recall']}, "
+                  f"agent_recall_steps {got['agent_recall_steps']} ({got['note']})")
+            held = held and got["agent_recall_steps"] == wanted
     print("GATE " + ("PASSED" if held else "FAILED") + ": leaky -> "
           f"{results['leaky']['grade']}, safe -> {results['safe']['grade']}")
     return 0 if held else 1

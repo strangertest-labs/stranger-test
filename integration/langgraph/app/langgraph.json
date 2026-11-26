@@ -1,5 +1,13 @@
 {
-  "dependencies": ["."],
-  "graphs": {"memory": "./graph.py:graph"},
-  "auth": {"path": "./auth.py:auth"}
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "memory": "./graph.py:graph",
+    "retrieval": "./retrieval.py:graph",
+    "retrieval_hidden": "./retrieval.py:hidden_graph"
+  },
+  "auth": {
+    "path": "./auth.py:auth"
+  }
 }
