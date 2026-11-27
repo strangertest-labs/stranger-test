@@ -1,4 +1,4 @@
-name: "Stranger Test"
+name: "Stranger Test Tenant Isolation Check"
 description: "Test whether user B can read user A's data in a LangGraph agent server, an MCP server or an LLM response cache."
 author: "Vedant Agarwal"
 branding:

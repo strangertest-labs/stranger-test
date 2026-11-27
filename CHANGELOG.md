@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.9
+
+- The GitHub Action is now named "Stranger Test Tenant Isolation Check".
+  GitHub Marketplace needs a name that no other action, user or organization
+  has. Workflows that use `strangertest-labs/stranger-test@v0.4` need no change.
+  No change to any test.
+
 ## 0.4.8
 
 - **`agent_recall_store`**: a new agent-memory path (with the agent flags and
