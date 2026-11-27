@@ -179,6 +179,7 @@ _TESTS: Dict[str, Dict[str, Any]] = {
             "store_search_own_prefix": "B searches B's own namespace (ids that share a prefix)",
             "agent_recall": "B asks the agent to recall A's memory",
             "agent_recall_steps": "B asks the agent, and every step of B's run is checked for A's memory",
+            "agent_recall_store": "B asks the agent, and B's own Store is checked afterwards for a saved copy of A's memory",
             "store_edge_dot": "An identity whose id differs from A's by a dot-separated part searches its own namespace",
             "store_edge_separator": "An identity whose id differs from A's by a separator character searches its own namespace",
             "store_edge_wildcard": "An identity whose id contains a wildcard character searches its own namespace",

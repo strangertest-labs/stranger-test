@@ -53,7 +53,7 @@ alone:
 
 These are reported `NOT_RUN`, because they need more input from you (section 4):
 `thread_state`, `thread_history`, `agent_recall`, `agent_recall_steps`,
-`store_search_own_prefix`, the
+`agent_recall_store`, `store_search_own_prefix`, the
 awkward-id cases (`store_edge_...`) and the four write paths. The last line of
 the output names the flags that would turn them on.
 
@@ -153,6 +153,16 @@ own code chooses the namespace, so make sure it includes the user there too.
   leaves them out of the answer. The note names the node where the marker first
   appeared. If A's own run never shows her marker in any step, the path is
   `NOT_EXERCISED`, not `OK`.
+
+  `agent_recall_store` (also needs `--namespace-b`, B's own Store namespace)
+  asks whether B's run left a copy behind. A node can fetch A's data and save
+  it as B's own memory; the copy then outlives the run, even when the run's
+  state is clean. The test searches the Store as B, in B's own namespace and
+  with no namespace, just before and just after each run B makes. It reports
+  `LEAK` if an item holding A's marker appeared during B's run. An item B could
+  already see before the run is not counted here; the Store paths report that.
+  As the control, B then saves an item of its own and must find it with the
+  same search. If B cannot, the path is `NOT_EXERCISED`, not `OK`.
 - `--whoami-field` names a field in your agent's run output that carries the
   caller's identity, if your app has one. The test uses it to make sure the two
   tokens really are two different users.
@@ -344,6 +354,10 @@ Add `--json` for the full report. Tokens and markers appear only as short
   not visible from outside. Assert on your retriever's output in your own
   tests as well. The marker is a random string, so a retriever that ranks by
   similarity may never fetch it; the path then reads `NOT_EXERCISED`.
+- `agent_recall_store` sees only a copy that lands where B can search: B's own
+  namespace, or a search with no namespace if the server allows one. A copy
+  saved under another namespace, in another database or in a thread is not
+  seen. Each search reads at most 100 items.
 - Only test servers you run or are authorized to test. Anything that is not on
   localhost is refused unless you pass `--allow-nonloopback`.
 - The awkward-id cases only cover the Store, and only the id shapes you supply

@@ -1,5 +1,5 @@
 name: "Stranger Test"
-description: "Test an MCP server, a LangGraph agent server or a response cache for cross-user leaks: a read-only scan, or a two-identity confirm."
+description: "Test whether user B can read user A's data in a LangGraph agent server, an MCP server or an LLM response cache."
 author: "Vedant Agarwal"
 branding:
   icon: "shield"

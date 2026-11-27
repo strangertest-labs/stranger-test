@@ -53,9 +53,13 @@ from strangertest.agent_memory import run_agent_memory_probe  # noqa: E402
 
 FORBIDDEN_PORTS = {4000, 4444, 8790}
 PORT_WAIT_S = 60
-AGENT = dict(assistant_id="memory",
+AGENT = dict(assistant_id="memory", namespace_b=["bob"],
              save_input={"action": "save", "key": "st-probe", "value": "{marker}"},
              recall_input={"action": "recall", "key": "st-probe"}, whoami_field="whoami")
+# The control for ``agent_recall_store``: the same run through ``memory_saves``,
+# an agent that is wrong on purpose (``app/saves.py``). Expect LEAK. Only run
+# with ST_GATE_SAVES_CONTROL=1, and kept apart from the graded runs.
+CONTROL = dict(AGENT, assistant_id="memory_saves")
 
 
 def _edge(kind, token, user_id):
@@ -184,6 +188,10 @@ def main():
             reports[name] = run_agent_memory_probe(
                 base, token_a, "tok-bob", namespace_a=namespace_a, edge_identities=edges,
                 write_paths=writes, authorized=True, **(AGENT if name == "main" else {}))
+        control = None
+        if os.environ.get("ST_GATE_SAVES_CONTROL") == "1":
+            control = run_agent_memory_probe(base, "tok-alice", "tok-bob", namespace_a=["alice", "notes"],
+                                             authorized=True, **CONTROL)
     finally:
         try:
             os.killpg(proc.pid, signal.SIGTERM)
@@ -204,6 +212,8 @@ def main():
                 "langgraph_api_version": api_version,
                 "server_log_confirms_custom_store": used_custom_store,
                 "other_runs": {name: reports[name].to_dict() for name in reports if name != "main"}})
+    if control is not None:
+        out["control_runs"] = {"memory_saves": control.to_dict()}
     with open(os.path.join(scratch, f"server-store-{tag}.json"), "w") as handle:
         json.dump(out, handle, indent=2)
     print(f"langgraph {langgraph_version}, langgraph-api {api_version}, "
@@ -212,6 +222,12 @@ def main():
         print(f"[{name}] grade: {report.grade} - {report.detail}")
         for path in report.paths:
             if name == "main" or path["outcome"] != "NOT_RUN":
+                print(f"    {path['outcome']:<14} {path['name']}  ({path.get('note', '')})")
+    if control is not None:
+        print("[control: memory_saves, an agent that saves what it fetches; LEAK is expected] "
+              f"grade: {control.grade}")
+        for path in control.paths:
+            if path["name"].startswith("agent_recall"):
                 print(f"    {path['outcome']:<14} {path['name']}  ({path.get('note', '')})")
     if not used_custom_store:
         print(f"WARNING: the server log does not show the {kind} store in use; "

@@ -5,7 +5,7 @@ When a new release of `langgraph-api`, `langgraph` or
 is run again against a real LangGraph dev server with that release installed.
 This page records each run.
 
-Last updated: 2026-11-25. The page is updated by hand after a run, so it can be
+Last updated: 2026-11-27. The page is updated by hand after a run, so it can be
 a few days behind PyPI.
 
 ## What a row means, and what it does not
@@ -38,6 +38,7 @@ LangGraph 1.2.24 in every row.
 | 2026-11-24 | 0.18.5 | 3.1.3 | `OK` | no change |
 | 2026-11-25 | 0.18.6 | 3.1.3 | `OK` | no change |
 | 2026-11-25 | 0.19.0 | 3.1.3 | `OK` | no change |
+| 2026-11-27 | 0.19.1 | 3.1.3 | `OK` | no change |
 
 Notes:
 
@@ -53,11 +54,16 @@ Notes:
   local dev runtime is installed with `langgraph-api[inmem]`, and the bare
   package no longer starts `langgraph dev`. With the extra installed the run
   completed.
+- **0.19.1** also runs `agent_recall_store`, a path added to the check in
+  stranger-test 0.4.8. In the same run the gate's control was on: through a
+  sample agent that saves what it fetches (`memory_saves`), the path reported
+  `LEAK`. That agent also returns the data in its answer, so `agent_recall`
+  and `agent_recall_steps` reported `LEAK` for it too.
 
 ## The latest run, path by path
 
-`langgraph-api` 0.19.0, `langgraph` 1.2.24, `langgraph-checkpoint-sqlite` 3.1.3,
-run on 2026-11-25. A = `alice`, B = `bob`.
+`langgraph-api` 0.19.1, `langgraph` 1.2.24, `langgraph-checkpoint-sqlite` 3.1.3,
+run on 2026-11-27. A = `alice`, B = `bob`.
 
 | Path | Result |
 |---|---|
@@ -78,12 +84,13 @@ run on 2026-11-25. A = `alice`, B = `bob`.
 | `store_edge_whitespace` | `OK` |
 | `agent_recall` | `OK` |
 | `agent_recall_steps` | `OK` |
+| `agent_recall_store` | `OK` |
 | `thread_update` | `OK` |
 | `store_put_overwrite` | `OK` |
 | `thread_delete` | `OK` |
 | `store_delete` | `OK` |
 
-19 paths exercised, 2 not exercised:
+20 paths exercised, 2 not exercised:
 
 - `store_search_all`: the sample app refuses a Store search with no namespace
   for everyone, including user A (HTTP 403). A could not read her own marker
@@ -102,12 +109,15 @@ reason above.
 of B's run. A node that fetches data and writes none of it to state is not
 visible from outside the server.
 
+`agent_recall_store` searches the Store as B before and after each of B's
+runs. It only sees a copy saved where B can search.
+
 ## Repeat a row yourself
 
 In a fresh virtual environment, with the versions from the row:
 
 ```bash
-pip install "langgraph-cli[inmem]" "langgraph-api[inmem]==0.19.0" \
+pip install "langgraph-cli[inmem]" "langgraph-api[inmem]==0.19.1" \
   "langgraph==1.2.24" "langgraph-checkpoint-sqlite==3.1.3"
 LANGGRAPH_BIN=<env>/bin/langgraph ST_GATE_SCRATCH=<an empty dir> ST_GATE_PORT=4645 \
   python3 integration/langgraph/real_server_store_gate.py

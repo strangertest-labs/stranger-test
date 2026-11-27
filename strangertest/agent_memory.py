@@ -280,6 +280,16 @@ def _parse_sse(text: str) -> List[Tuple[str, str]]:
     return events
 
 
+def _items_holding(response: "_Response", text: str) -> set:
+    """Which items of a Store search answer hold ``text``, as (namespace, key) labels."""
+    answer = response.json()
+    items = answer.get("items") if isinstance(answer, dict) else None
+    if not isinstance(items, list):
+        return {"<the answer>"} if text in response.body else set()
+    return {json.dumps([item.get("namespace"), item.get("key")] if isinstance(item, dict) else item)
+            for item in items if text in json.dumps(item)}
+
+
 def _event_origin(name: str, data: str, marker: str) -> str:
     """Where in a run an event came from, for the note. Never the marker."""
     try:
@@ -361,7 +371,8 @@ class AgentMemoryReport:
             parts.append("to also test through the agent: " + ", ".join(agent))
         if self.missing_inputs.get("namespace_b"):
             parts.append("to also test the Store namespace boundary: --namespace-b "
-                         "(with prefix-sibling ids)")
+                         "(with prefix-sibling ids; with the agent flags it also checks B's "
+                         "Store after B's run)")
         edge = self.missing_inputs.get("edge")
         if edge:
             parts.append("to also test awkward-id pairs (" + ", ".join(edge) + "): "
@@ -437,9 +448,11 @@ def run_agent_memory_probe(
         # Only name a flag when a path it would enable was actually left NOT_RUN.
         not_run = {p["name"] for p in paths if p["outcome"] == P_NOT_RUN}
         relevant = {}
-        if missing_inputs.get("agent") and not_run & {"thread_state", "thread_history", "agent_recall", "agent_recall_steps"}:
+        if missing_inputs.get("agent") and not_run & {"thread_state", "thread_history", "agent_recall", "agent_recall_steps",
+                                                         "agent_recall_store"}:
             relevant["agent"] = missing_inputs["agent"]
-        if missing_inputs.get("namespace_b") and "store_search_own_prefix" in not_run:
+        if missing_inputs.get("namespace_b") and not_run & {"store_search_own_prefix",
+                                                           "agent_recall_store"}:
             relevant["namespace_b"] = missing_inputs["namespace_b"]
         unsupplied = [k for k in missing_inputs.get("edge", []) if EDGE_PATHS[k] in not_run]
         if unsupplied:
@@ -724,6 +737,30 @@ def run_agent_memory_probe(
     for kind in EDGE_KINDS:
         edge_case(kind)
 
+    # B's Store as B can search it, read just before and just after each run B
+    # makes, for the ``agent_recall_store`` path further down. A's runs happen
+    # outside those windows, so a new item in one of them came from B's run.
+    spill_name, spill_what = ("agent_recall_store",
+                              "B's run saved A's memory into the Store where B can read it")
+    own_b = list(namespace_b) if namespace_b else []
+    store_gained: List[str] = []
+
+    def b_store_view() -> Dict[str, _Response]:
+        return {label: b.call("POST", "/store/items/search", {"namespace_prefix": prefix, "limit": 100})
+                for label, prefix in (("B's own-namespace search", own_b),
+                                      ("B's search with no namespace", []))}
+
+    def watched(run_as_b):
+        """Make one of B's runs; note any search that gained an item holding A's marker."""
+        if not own_b:
+            return run_as_b()
+        before = b_store_view()
+        result = run_as_b()
+        for label, got in b_store_view().items():
+            if _items_holding(got, marker) - _items_holding(before[label], marker):
+                store_gained.append(label)
+        return result
+
     # Through the agent: B asks, in B's own thread, for what A saved.
     recall_name, recall_what = "agent_recall", "B asks the agent for A's memory"
     if assistant_id and recall_input is not None and run_planted:
@@ -745,8 +782,9 @@ def run_agent_memory_probe(
                           "control_status": a_recall.status,
                           "note": f"the agent did not return A's own marker to A (HTTP {a_recall.status})"})
         elif thread_b:
-            recalled = b.call("POST", f"/threads/{thread_b}/runs/wait",
-                              {"assistant_id": assistant_id, "input": _fill(recall_input, marker)})
+            recalled = watched(lambda: b.call(
+                "POST", f"/threads/{thread_b}/runs/wait",
+                {"assistant_id": assistant_id, "input": _fill(recall_input, marker)}))
             if whoami_field and isinstance(recalled.json(), dict):
                 whoami["b"] = recalled.json().get(whoami_field)
             seen = marker in recalled.body
@@ -803,6 +841,8 @@ def run_agent_memory_probe(
                         seen["where"] = "the thread's " + source
         return seen
 
+    b_steps: Dict[str, Any] = {"ran": False, "status": 0, "sources": {}, "where": None}
+
     if not (assistant_id and recall_input is not None and run_planted):
         paths.append({"name": steps_name, "what": steps_what,
                       "outcome": P_NOT_RUN, "note": "needs assistant_id, save_input and recall_input"})
@@ -811,6 +851,7 @@ def run_agent_memory_probe(
                       "outcome": P_NOT_RUN, "note": "recall_input must not contain {marker}"})
     else:
         a_steps = observe(a)
+        b_steps = watched(lambda: observe(b))      # also serves the Store path below
         proving = sorted(source for source, hit in a_steps["sources"].items() if hit)
         controls["a_agent_steps_sees_marker"] = bool(proving)
         controls["agent_steps_sources"] = sorted(a_steps["sources"])
@@ -823,7 +864,6 @@ def run_agent_memory_probe(
                           "note": "A's own marker did not appear in any step of A's own run "
                                   f"(HTTP {a_steps['status']})"})
         else:
-            b_steps = observe(b)
             leaking = sorted(source for source, hit in b_steps["sources"].items() if hit)
             if not b_steps["ran"]:
                 paths.append({"name": steps_name, "what": steps_what, "outcome": P_NOT_EXERCISED,
@@ -845,6 +885,49 @@ def run_agent_memory_probe(
                               "note": "checked: " + ", ".join(sorted(b_steps["sources"]))
                                       + ". A node that fetches data and writes none of it to "
                                         "state is not visible from outside"})
+
+    # Through the agent, into the Store: did B's run leave a copy of A's memory
+    # where B can read it later? A node can fetch A's data and save it as B's
+    # own memory, and then it outlives the run. Only an item that appeared
+    # during one of B's runs and holds A's marker counts; an item B could
+    # already see belongs to the Store paths above.
+    if not (assistant_id and recall_input is not None and run_planted):
+        paths.append({"name": spill_name, "what": spill_what,
+                      "outcome": P_NOT_RUN, "note": "needs assistant_id, save_input and recall_input"})
+    elif marker in json.dumps(_fill(recall_input, marker)):
+        paths.append({"name": spill_name, "what": spill_what,
+                      "outcome": P_NOT_RUN, "note": "recall_input must not contain {marker}"})
+    elif not own_b:
+        paths.append({"name": spill_name, "what": spill_what, "outcome": P_NOT_RUN,
+                      "note": "needs namespace_b (B's own Store namespace)"})
+    elif not b_steps["ran"]:
+        paths.append({"name": spill_name, "what": spill_what, "outcome": P_NOT_EXERCISED,
+                      "b_status": b_steps["status"],
+                      "note": f"B's own run did not complete (HTTP {b_steps['status']})"})
+    else:
+        # The control: an item B writes now must show up in the same search.
+        control_text = "st-own-" + secrets.token_hex(8)
+        control_put = b.call("PUT", "/store/items", {"namespace": own_b + [tag], "key": "st-after-run",
+                                                    "value": {"text": control_text}})
+        store_after = b_store_view()
+        working = [label for label, got in store_after.items() if control_text in got.body]
+        gained = list(dict.fromkeys(store_gained))
+        controls["b_store_search_sees_own_item"] = bool(working)
+        statuses = ", ".join(f"HTTP {got.status}" for got in store_after.values())
+        if gained:
+            paths.append({"name": spill_name, "what": spill_what, "outcome": P_LEAK,
+                          "b_status": store_after[gained[0]].status,
+                          "note": f"after B's run, {gained[0]} returned a new item holding A's marker"})
+        elif not working:
+            paths.append({"name": spill_name, "what": spill_what, "outcome": P_NOT_EXERCISED,
+                          "b_status": control_put.status,
+                          "note": "B could not store and search an item of its own (put HTTP "
+                                  f"{control_put.status}, search {statuses})"})
+        else:
+            paths.append({"name": spill_name, "what": spill_what, "outcome": P_OK,
+                          "b_status": store_after[working[0]].status,
+                          "note": "no new item holding A's marker in " + " or ".join(working)
+                                  + ". A copy saved where B cannot search is not seen"})
 
     # Existence only: can B see that A's namespace exists?
     listing = b.call("POST", "/store/namespaces", {"limit": 100})

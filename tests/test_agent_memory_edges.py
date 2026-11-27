@@ -222,7 +222,8 @@ class WritePaths(unittest.TestCase):
 
 class AcrossTheBoard(unittest.TestCase):
     def test_safe_is_ok_with_everything_turned_on(self):
-        report = probe("safe", edge_identities=edges(), write_paths=True, **dt._PRACTICE_AGENT)
+        report = probe("safe", edge_identities=edges(), write_paths=True, namespace_b=["bob"],
+                       **dt._PRACTICE_AGENT)
         got = outcomes(report)
         self.assertEqual(got.pop("store_search_all"), "NOT_EXERCISED")   # refused even for A
         self.assertEqual(set(got.values()), {"OK"}, report.summary())

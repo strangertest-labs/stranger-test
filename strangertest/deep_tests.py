@@ -289,7 +289,7 @@ def _demo_agent_memory() -> Dict[str, Any]:
            # The safe server gets everything at once: every awkward-id identity and
            # the write paths. All of it must come back clean.
            "safe": run("safe", write_paths=True, edge_identities=_practice_edge_identities(),
-                       **_PRACTICE_AGENT)}
+                       namespace_b=["bob"], **_PRACTICE_AGENT)}
     # The namespace-boundary shape needs prefix-sibling ids: B is "ali", A is "alice".
     out["prefixbug"] = run("prefixbug", token_b="tok-ali", namespace_b=["ali"])
     for kind, mode in _PRACTICE_EDGE_BUGS[1:]:

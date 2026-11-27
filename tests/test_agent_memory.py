@@ -58,8 +58,9 @@ class Grades(unittest.TestCase):
         # Owner-field paths are writes, gated by --write-paths.
         self.assertEqual(got.pop("owner_in_body_thread_create"), "NOT_RUN")
         self.assertEqual(got.pop("owner_in_body_store_put"), "NOT_RUN")
+        self.assertEqual(got.pop("agent_recall_store"), "NOT_RUN")       # no namespace_b given
         self.assertEqual(set(got.values()), {"LEAK"}, report.summary())
-        self.assertEqual(len(report.paths), 21)
+        self.assertEqual(len(report.paths), 22)
 
     def test_safe_server_is_ok(self):
         report = probe("safe")
@@ -72,6 +73,7 @@ class Grades(unittest.TestCase):
             self.assertEqual(got.pop(name), "NOT_RUN")
         self.assertEqual(got.pop("owner_in_body_thread_create"), "NOT_RUN")
         self.assertEqual(got.pop("owner_in_body_store_put"), "NOT_RUN")
+        self.assertEqual(got.pop("agent_recall_store"), "NOT_RUN")       # no namespace_b given
         self.assertEqual(set(got.values()), {"OK"}, report.summary())
         self.assertTrue(report.controls["auth_enforced"])
         self.assertTrue(report.controls["a_agent_recall_sees_marker"])
@@ -105,6 +107,83 @@ class Grades(unittest.TestCase):
         report = probe("leaky", whoami_field="key")
         self.assertEqual(report.grade, OBSERVATION, report.summary())
         self.assertIn("same identity", report.detail)
+
+
+class RecallStore(unittest.TestCase):
+    """``agent_recall_store``: after B's run, is a copy of A's memory sitting in
+    the Store where B can search it? ``sharedagent`` scopes threads and the
+    Store per user, and its agents read one shared memory."""
+
+    def store(self, mode, assistant, **overrides):
+        overrides.setdefault("namespace_b", ["bob"])
+        report = probe(mode, assistant_id=assistant, **overrides)
+        return report, {p["name"]: p for p in report.paths}
+
+    def test_a_run_that_saves_what_it_fetched_is_a_leak(self):
+        report, paths = self.store("sharedagent", "retrieval_saves")
+        self.assertEqual(paths["agent_recall_store"]["outcome"], "LEAK", report.summary())
+        self.assertIn("own-namespace search", paths["agent_recall_store"]["note"])
+        self.assertEqual(paths["agent_recall_steps"]["outcome"], "LEAK")
+        self.assertEqual(report.grade, LEAK)
+        self.assertIn("agent_recall_store", report.detail)
+
+    def test_a_copy_saved_by_b_first_run_is_still_seen(self):
+        # ``memory_saves`` shows the marker in its answer, so B's plain run comes
+        # first and saves the copy; the streamed run then only overwrites it.
+        report, paths = self.store("sharedagent", "memory_saves")
+        self.assertEqual(paths["agent_recall"]["outcome"], "LEAK")
+        self.assertEqual(paths["agent_recall_store"]["outcome"], "LEAK", report.summary())
+
+    def test_a_run_that_fetches_and_saves_nothing_is_ok_and_names_its_limit(self):
+        report, paths = self.store("sharedagent", "retrieval")
+        self.assertEqual(paths["agent_recall_steps"]["outcome"], "LEAK")
+        self.assertEqual(paths["agent_recall_store"]["outcome"], "OK", report.summary())
+        self.assertIn("where B cannot search is not seen", paths["agent_recall_store"]["note"])
+        self.assertTrue(report.controls["b_store_search_sees_own_item"])
+
+    def test_per_user_agent_that_saves_is_ok(self):
+        for assistant in ("retrieval_saves", "memory_saves"):
+            with self.subTest(assistant=assistant):
+                report, paths = self.store("safe", assistant)
+                self.assertEqual(paths["agent_recall_store"]["outcome"], "OK", report.summary())
+                self.assertEqual(report.grade, OK, report.summary())
+
+    def test_an_item_b_could_already_see_is_not_counted_as_saved_by_the_run(self):
+        # On the unscoped server B's search shows A's item before any run. The
+        # Store paths report that; this path only reports what B's run added.
+        report, paths = self.store("leaky", "memory")
+        self.assertEqual(paths["store_search_all"]["outcome"], "LEAK")
+        self.assertEqual(paths["agent_recall_store"]["outcome"], "OK", report.summary())
+        report, paths = self.store("leaky", "retrieval_saves")
+        self.assertEqual(paths["agent_recall_store"]["outcome"], "LEAK", report.summary())
+
+    def test_store_b_cannot_search_is_not_exercised_never_ok(self):
+        report, paths = self.store("broken", "memory")
+        self.assertEqual(paths["agent_recall_store"]["outcome"], "NOT_EXERCISED")
+        self.assertFalse(report.controls["b_store_search_sees_own_item"])
+
+    def test_b_run_that_does_not_complete_is_not_exercised(self):
+        report, paths = self.store("aliceruns", "retrieval_saves")
+        self.assertEqual(paths["agent_recall_store"]["outcome"], "NOT_EXERCISED")
+        self.assertEqual(paths["agent_recall_store"]["b_status"], 403)
+
+    def test_not_run_without_b_namespace_or_agent_inputs(self):
+        report, paths = self.store("sharedagent", "retrieval_saves", namespace_b=None)
+        self.assertEqual(paths["agent_recall_store"]["outcome"], "NOT_RUN")
+        self.assertIn("namespace_b", paths["agent_recall_store"]["note"])
+        self.assertIn("--namespace-b", report.hint())
+        with serving("sharedagent") as url:
+            report = run_agent_memory_probe(url, A, B, namespace_b=["bob"], authorized=True)
+        self.assertEqual(outcomes(report)["agent_recall_store"], "NOT_RUN")
+
+    def test_recall_input_must_not_carry_the_marker(self):
+        report, paths = self.store("sharedagent", "retrieval_saves",
+                                   recall_input={"action": "recall", "key": "{marker}"})
+        self.assertEqual(paths["agent_recall_store"]["outcome"], "NOT_RUN")
+
+    def test_no_marker_in_the_report_when_the_store_path_leaks(self):
+        report, _ = self.store("sharedagent", "retrieval_saves")
+        self.assertNotIn("st-mem-", json.dumps(report.to_dict()) + report.summary())
 
 
 class RecallSteps(unittest.TestCase):

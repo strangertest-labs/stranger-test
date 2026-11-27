@@ -156,9 +156,10 @@ class ActionRunAgentMemory(unittest.TestCase):
         self.assertIn("LEAK", out)
 
     def test_safe_agent_server_passes_with_every_option(self):
-        code, out = self._run("safe", ST_NAMESPACE_A="alice.notes", **self.AGENT)
+        code, out = self._run("safe", ST_NAMESPACE_A="alice.notes", ST_NAMESPACE_B="bob",
+                              **self.AGENT)
         self.assertEqual(code, 0, out)
-        self.assertIn("agent_recall", out)
+        self.assertIn("OK             agent_recall_store", out)
         self.assertNotIn("NOT_RUN        agent_recall", out)
 
     def test_namespace_b_reaches_the_tool(self):

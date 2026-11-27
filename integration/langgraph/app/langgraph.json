@@ -4,6 +4,7 @@
   ],
   "graphs": {
     "memory": "./graph.py:graph",
+    "memory_saves": "./saves.py:graph",
     "retrieval": "./retrieval.py:graph",
     "retrieval_hidden": "./retrieval.py:hidden_graph"
   },

@@ -32,6 +32,11 @@ The bundled "agents" all take
 * ``retrieval_hidden`` -- two steps; ``docs`` stays in the thread's state, but
   the run's answer and its ``updates`` / ``values`` events leave it out (an
   output schema). The ``debug`` events and the thread state still show it.
+* ``memory_saves`` -- like ``memory``, and a recall also saves what it found
+  into the caller's own Store namespace (``<user>.learned``).
+* ``retrieval_saves`` -- like ``retrieval``, with a ``remember`` step between
+  the two that saves what was fetched into the caller's own Store namespace
+  (``<user>.learned``). The run's final state is clean; the saved copy stays.
 
 As on a LangGraph dev server, a thread's history holds the state after the
 run, not one entry per step.
@@ -72,6 +77,9 @@ cannot carry at its edge (``tok-alice%20`` is the id ``"alice "``). Modes:
   with success and silently dropped.
 * ``nowrites`` -- like ``safe``, but nobody can update or delete anything (405),
   so the write paths' own controls fail.
+* ``sharedagent`` -- like ``safe`` (threads and the Store are scoped per
+  user), but the bundled agents read and write one shared memory, so user B's
+  run fetches what user A saved.
 * ``nostream`` -- like ``leaky``, but there is no ``runs/stream`` endpoint (404).
 * ``nosteps`` -- like ``leaky``, with no ``runs/stream`` and no readable thread
   state or history (404), so a run's steps cannot be read at all.
@@ -101,10 +109,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 MODES = ("leaky", "safe", "meta", "open", "broken", "prefixbug", "dotbug", "separatorbug",
          "wildcardbug", "casebug", "whitespacebug", "strictids", "writeleak", "writeack",
-         "nowrites", "bodyowner", "nostream", "nosteps", "aliceruns")
+         "nowrites", "bodyowner", "nostream", "nosteps", "aliceruns", "sharedagent")
 FORBIDDEN_PORTS = {4000, 4444, 8790}
 ASSISTANT_ID = "memory"
-ASSISTANTS = ("memory", "retrieval", "retrieval_hidden")
+ASSISTANTS = ("memory", "memory_saves", "retrieval", "retrieval_hidden", "retrieval_saves")
 # Modes with no per-user scoping at all (one shared memory, every thread readable).
 _UNSCOPED = ("leaky", "open", "nostream", "nosteps")
 _OUTPUT_KEYS = ("result", "whoami")       # what ``retrieval_hidden`` lets out
@@ -256,8 +264,9 @@ class AgentMemoryState:
         if assistant not in ASSISTANTS:
             raise _HTTPError(404, "Thread or assistant not found.")
         state = dict(body.get("input") or {})
-        label = "memories" if assistant == ASSISTANT_ID else "retrieval"
-        namespace = (label,) if self.mode in _UNSCOPED else (user, label)
+        label = "memories" if assistant in (ASSISTANT_ID, "memory_saves") else "retrieval"
+        shared = self.mode in _UNSCOPED or self.mode == "sharedagent"
+        namespace = (label,) if shared else (user, label)
         namespace = self._canon(namespace)
         key = str(state.get("key"))
         saving = state.get("action") == "save"
@@ -274,13 +283,21 @@ class AgentMemoryState:
             state.update(wrote)
             steps.append((node, dict(wrote), dict(state)))
 
-        if assistant == ASSISTANT_ID:
+        if assistant in (ASSISTANT_ID, "memory_saves"):
+            if assistant == "memory_saves" and found is not None:
+                with self._lock:
+                    self.items[(self._canon((user, "learned")), key)] = {"text": found}
             step("memory", {"result": "saved" if saving else found, "whoami": user})
         else:
             docs = [] if found is None else [found]
             step("retrieve", {"docs": docs, "whoami": user})
+            if assistant == "retrieval_saves":
+                if docs:
+                    with self._lock:
+                        self.items[(self._canon((user, "learned")), key)] = {"text": found}
+                step("remember", {"remembered": len(docs)})
             answer = {"value": None, "result": "answered from %d document(s)" % len(docs)}
-            if assistant == "retrieval":
+            if assistant in ("retrieval", "retrieval_saves"):
                 answer["docs"] = []
             step("answer", answer)
         with self._lock:

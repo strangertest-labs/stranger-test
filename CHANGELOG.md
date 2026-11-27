@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.8
+
+- **`agent_recall_store`**: a new agent-memory path (with the agent flags and
+  `--namespace-b`). After user B's run it searches the Store as B, and reports
+  `LEAK` if the run saved a copy of user A's data where B can read it later.
+  See [docs/AGENT-MEMORY.md](docs/AGENT-MEMORY.md).
+- The LangGraph server gate passes B's namespace, so it runs the new path. The
+  sample app has a new agent that is wrong on purpose (`memory_saves`), used as
+  the control: with `ST_GATE_SAVES_CONTROL=1` the gate shows the path reporting
+  `LEAK` on a real server.
+- The action's description is shorter, to fit GitHub Marketplace.
+
 ## 0.4.7
 
 - **A new README first screen**: what the tool answers, one demo command and
