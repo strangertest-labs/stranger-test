@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "stranger-test"
 dynamic = ["version"]
-description = "Two-user tenant isolation tests for AI applications: MCP servers and gateways, agent memory, and LLM response caches."
+description = "Can user B read user A's data in your AI app? Two-user tenant isolation tests (IDOR/BOLA) for LangGraph agent servers, MCP servers and gateways, and LLM semantic caches."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
@@ -14,30 +14,49 @@ authors = [{ name = "Vedant Agarwal" }]
 keywords = [
     "mcp",
     "model-context-protocol",
-    "security",
-    "authorization",
-    "confused-deputy",
+    "mcp-security",
+    "langgraph",
+    "langchain",
     "tenant-isolation",
     "multi-tenant",
-    "data-segregation",
+    "cross-tenant",
+    "idor",
+    "bola",
+    "broken-access-control",
+    "authorization",
+    "security-testing",
+    "pentest",
     "ai-agents",
     "agent-memory",
     "semantic-cache",
     "llm",
+    "llm-security",
+    "confused-deputy",
+    "data-segregation",
 ]
 dependencies = []
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Security",
     "Topic :: Software Development :: Testing",
 ]
 
 [project.urls]
+Homepage = "https://github.com/strangertest-labs/stranger-test"
 Repository = "https://github.com/strangertest-labs/stranger-test"
+Documentation = "https://github.com/strangertest-labs/stranger-test/tree/main/docs"
+Changelog = "https://github.com/strangertest-labs/stranger-test/blob/main/CHANGELOG.md"
+Issues = "https://github.com/strangertest-labs/stranger-test/issues"
 
 [project.scripts]
 strangertest = "strangertest.cli:main"

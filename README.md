@@ -1,12 +1,55 @@
 # Stranger Test
 
-**A two-user test for AI applications: can user B reach user A's data?**
+**Can user B read user A's data in your AI app? A two-user test that finds out.**
 
-Tenant isolation testing for AI agents, MCP gateways and LLM caches, with an
-evidence page and a short summary for each run.
+[![PyPI](https://img.shields.io/pypi/v/stranger-test)](https://pypi.org/project/stranger-test/)
+[![Python](https://img.shields.io/pypi/pyversions/stranger-test)](https://pypi.org/project/stranger-test/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![selftest](https://github.com/strangertest-labs/stranger-test/actions/workflows/selftest.yml/badge.svg)](https://github.com/strangertest-labs/stranger-test/actions/workflows/selftest.yml)
 
-An AI application keeps many users' data behind one endpoint: in an MCP server
-or gateway, in an agent's memory, in a cache of model answers. Stranger Test
+Tenant isolation testing for **LangGraph agent servers**, **MCP servers and
+gateways**, and **LLM semantic caches**. It is the two-account access check that
+a penetration tester does by hand (IDOR / BOLA, cross-tenant access), made
+repeatable: sign in as two test users and see whether one can read the other's
+threads, memory, tool state or cached answers.
+
+See it catch a leak, with nothing to set up. This starts two small practice
+servers on your own machine, one leaky and one safe:
+
+```bash
+pip install stranger-test
+stranger-test confirm agent-memory --demo
+```
+
+```
+-- against a KNOWN-LEAKY server (the test must catch it):
+LEAK: another identity reached identity A's memory on 15 of 15 paths: ...
+  LEAK           thread_get: B reads A's thread by id (B got HTTP 200)
+  LEAK           store_get: B reads A's memory item by namespace and key (B got HTTP 200)
+  LEAK           agent_recall: B asks the agent for A's memory (B got HTTP 200)
+  ...
+-- against a SAFE server (must come back clean):
+OK: identity B could not read identity A's memory on any of the 20 exercised paths.
+  OK             thread_get: B reads A's thread by id (B got HTTP 404)
+  OK             store_get: B reads A's memory item by namespace and key (B got HTTP 403)
+  ...
+VERDICT: the test WORKS (leaky -> LEAK, safe -> OK, ...)
+```
+
+(Output shortened; `...` marks lines left out.) Then point it at a LangGraph
+server you run, with two test users' tokens:
+
+```bash
+stranger-test confirm agent-memory http://127.0.0.1:2024 --token-a <A's token> --token-b <B's token>
+```
+
+Free, Apache-2.0, standard-library-only Python (3.9+). Test only systems you
+run or are authorized to test.
+
+## How it decides
+
+An AI application keeps many users' data behind one endpoint: in an agent's
+memory, in an MCP server or gateway, in a cache of model answers. Stranger Test
 signs in as two test users. User A stores a unique marker, and the test tries
 each way user B might get it. Each path is graded **LEAK**, **OK** or
 **INCONCLUSIVE**, and a path is only OK if A could read her own data back
@@ -14,22 +57,22 @@ first, so a broken test never passes for a safe system.
 
 What it tests:
 
+- **LangGraph agent memory**: threads and the long-term Store, over the
+  LangGraph Server API (`confirm agent-memory`). Guide:
+  [docs/AGENT-MEMORY.md](docs/AGENT-MEMORY.md). Results on each new LangGraph
+  server release: [docs/LANGGRAPH-RELEASE-CHECKS.md](docs/LANGGRAPH-RELEASE-CHECKS.md).
 - **MCP servers and gateways**: a quick single-user `scan`, and two-user
   `confirm` tests for state handles, tasks and elicitation.
-- **Agent memory**: threads and long-term store, over the LangGraph Server API
-  (`confirm agent-memory`).
-- **Response caches and LLM gateways**: exact and similar-question lookups
-  (`confirm semantic-cache`). Shared caches have leaked between customers in
-  production; [two public incidents](docs/CACHE.md#why-it-matters-two-public-incidents).
+- **LLM semantic caches and gateways**: exact and similar-question lookups in a
+  response cache (`confirm semantic-cache`). Shared caches have leaked between
+  customers in production;
+  [two public incidents](docs/CACHE.md#why-it-matters-two-public-incidents).
 
 Each `confirm` run can write an **evidence page** (`--evidence`): what
 was tested, by whom, when, each path's result, what was not tested, and how to
 repeat it. `--evidence-summary` writes a **short summary** of the same run,
 under half the length, to hand to someone who will not read four pages. It supplements an independent penetration test; it does not replace
 one. See [docs/EVIDENCE.md](docs/EVIDENCE.md).
-
-Status: early (alpha), one maintainer. Test only systems you run or are
-authorized to test.
 
 ## Who it is for
 
@@ -47,14 +90,14 @@ authorized to test.
   repeatable version of that test, with a baseline check so that a refusal to
   the second account means something.
 
+For an MCP server, the quickest start is the read-only scan:
+
 ```bash
 # scan any MCP server you run, in ~30s — no third-party dependencies:
 pip install stranger-test
 stranger-test scan http://localhost:4600/mcp
 # (or, zero-install with pipx: pipx run stranger-test scan http://localhost:4600/mcp)
 ```
-
-Free, Apache-2.0, standard-library-only Python (3.9+).
 
 ---
 
@@ -309,147 +352,10 @@ permitted the test. There is deliberately no "scan everything" mode: one target,
 one authorization. Any real finding is for **private, responsible disclosure**
 to the server's owner. Do not name-and-shame.
 
-## What's new in 0.4.6
+## What's new
 
-- **Run it on every release.** A CI section above, and a
-  [page of results](docs/LANGGRAPH-RELEASE-CHECKS.md) from running the
-  agent-memory check against each new LangGraph server release.
-- `docs/CI.md` now pins the action at `@v0.4`. The `@v0.3` it named before
-  does not have the `semantic-cache` test.
-- The LangGraph server gate waits up to a minute for its port to be free
-  before it gives up. No change to any test.
-
-### 0.4.5
-
-- **`agent_recall_steps`**: a new agent-memory path. It reads every step of
-  user B's run (the stream, the state and the history), not only the final
-  answer, so data that one step wrote to the graph's state and a later step
-  removed is still seen. See [docs/AGENT-MEMORY.md](docs/AGENT-MEMORY.md).
-
-### 0.4.3 and 0.4.4
-
-- **Owner-field paths** (`owner_in_body_thread_create`,
-  `owner_in_body_store_put`, with `--write-paths`): catch a handler that takes
-  the owner from the request body instead of from the signed-in user.
-- **A short evidence summary** (`--evidence-summary`) beside the full evidence
-  page.
-- Shorter `--demo` output and clearer first-run guidance.
-
-### 0.4.2
-
-- **The evidence page names the nearest SOC 2 criterion.** CC6.1 is listed with
-  the plain statement that no Trust Services Criterion names tenant
-  segregation, so it is the nearest one and not an exact match. Whether a page
-  counts toward it is the auditor's judgement.
-- **A security policy** ([SECURITY.md](SECURITY.md)) and a clearer description
-  of what the tool tests. No change to any test.
-
-### 0.4.1
-
-
-- **Connects to current MCP gateways.** The client opened connections with the
-  older `initialize` handshake while naming the newest protocol version, which
-  has no handshake; some gateways refused it. It now settles on a form the
-  server accepts: the per-request form (2026-07-28) or an older handshake
-  version, with the `MCP-Protocol-Version` header those versions require.
-- **`scan` no longer calls an unexamined server clean.** When a server refuses
-  every form, the verdict is "not examined", not "no risk signals". `scan` can
-  also examine servers that speak only the per-request form, and it now
-  completes the handshake and keeps the session a server issues.
-- **The evidence page stands on its own.** `confirm` takes the operator's own
-  words (`--evidence-system`, `--evidence-system-version`,
-  `--evidence-environment`, `--evidence-operator`, `--evidence-notes`,
-  `--evidence-identity-a`, `--evidence-identity-b`). `--evidence` can be given
-  twice to write Markdown and JSON from one run, and the raw result is saved
-  beside them. The page shows the command that was run with credentials
-  replaced, counts tested and untested paths in every summary, explains each
-  grade, and shows the HTTP status seen on each path. See
-  [docs/EVIDENCE.md](docs/EVIDENCE.md).
-
-### 0.4.0
-
-- **`confirm semantic-cache`** — a seventh deep test, for **response caches**:
-  can identity B get the answer a cache stored for identity A, by the same
-  question, a reworded one, or from a prefix-sibling id? Bundled `--demo`.
-- **Works against real caches and gateways.** Choose how each identity is sent
-  (`--identity-header`, a bearer token or API key with `--identity-as bearer` /
-  `--token-header`, a shared `--api-key`, the OpenAI `user` field), set the
-  paths (`--store-path`, `--query-path`), and give a third identity for the
-  prefix-sibling path (`--token-sibling`).
-- **Chat mode for LLM gateways** (`--cache-mode chat`): no store call; A asks
-  through `POST /v1/chat/completions`, must get a cache hit on her repeat, and
-  then B asks. A hit is recognised by a cache-hit header when there is one,
-  else by the response body. See [docs/CACHE.md](docs/CACHE.md).
-- **Several API routes in one run.** `--route chat|responses|messages[=PATH]`
-  (repeatable) tests each route and adds a cross-route path: A fills the cache
-  on one route, B asks on another. `--stream` repeats the check with streamed
-  responses.
-- **Awkward identifiers.** `--edge-identity KIND=TOKEN[@NAMESPACE]` (and
-  `--edge-user` for caches) adds identities whose ids are close to A's: a
-  prefix, a dotted label, a separator, a wildcard character, a case variant, a
-  whitespace variant. Works with `agent-memory` and `semantic-cache`.
-- **Write paths for `agent-memory`** (`--write-paths`): can B update, overwrite
-  or delete what A stored? Off by default against real targets, because these
-  calls change data; on in `--demo`. See
-  [docs/AGENT-MEMORY.md](docs/AGENT-MEMORY.md).
-- **An evidence file per run.** `confirm ... --evidence FILE` (`.md` or `.json`)
-  writes the page: the system, the run times, the two identities as
-  fingerprints, the positive-control result, each path's outcome and the
-  verdict. An inconclusive run is stated as "not a pass".
-  `--evidence-summary FILE` writes the short version of the same run. See
-  [docs/EVIDENCE.md](docs/EVIDENCE.md).
-- **The GitHub Action runs `semantic-cache`**, in both modes; see
-  [docs/CI.md](docs/CI.md).
-
-### 0.3.2
-
-- **The GitHub Action runs `agent-memory`.** New inputs `namespace-a`,
-  `namespace-b`, `assistant`, `save-input`, `recall-input` and `whoami-field`;
-  see [docs/CI.md](docs/CI.md).
-- **Verified on the Postgres store too.** Through a real LangGraph dev server on
-  PostgreSQL 16, `agent-memory` grades `LEAK` on `langgraph-checkpoint-postgres`
-  3.1.0 and `OK` on 3.1.1, the same as on SQLite. The gate takes
-  `ST_STORE_KIND=postgres` and refuses a database that is not empty.
-
-### 0.3.1
-
-- **Name for the failure:** an *agent memory spill* is one user of an agent app
-  reading memory stored for another user because a per-user access check is
-  missing or wrong. Defined in [docs/AGENT-MEMORY.md](docs/AGENT-MEMORY.md).
-- **Stronger evidence:** `agent-memory` now also runs through a real LangGraph
-  dev server whose Store is LangGraph's SQLite store
-  (`integration/langgraph/real_server_store_gate.py`): `LEAK` on
-  `langgraph-checkpoint-sqlite` 3.1.0, `OK` on 3.1.1. No change to the tool's
-  behaviour.
-
-### 0.3.0
-
-- **`confirm agent-memory`** — a sixth deep test (of seven today), for **agent servers** rather
-  than MCP servers: can identity B read what A saved in the agent's memory
-  (LangGraph threads, long-term Store, or via the agent)? Bundled `--demo`, and
-  a real-LangGraph gate in `integration/langgraph/`. Two tokens are enough to
-  run it on your own app: see [docs/AGENT-MEMORY.md](docs/AGENT-MEMORY.md).
-- **Store namespace-boundary catch.** With two prefix-sibling identities
-  (`--namespace-b`), `agent-memory` catches the LangGraph store bugs fixed in
-  2026 (CVE-2026-71433, CVE-2026-115883): it grades `LEAK` against the real
-  `langgraph-checkpoint-sqlite` 3.1.0 and `OK` against 3.1.1.
-
-### 0.2.0
-
-- **`scan`** (Tier 1) one-command read-only scanner, SARIF/JSON, CI exit codes.
-- **`confirm`** (Tier 2) five dynamic cross-user tests at the time (seven today), each with a `--demo`.
-- **Precision:** a `LEAK` needs provably distinct principals, else `OBSERVATION`.
-- **One exit-code scheme:** `0` OK, `1` LEAK/FAIL, `2` INCONCLUSIVE, `3` usage.
-
-Unit tests, from a clone of the repository root:
-
-```
-python3 -m unittest discover
-```
-
-(The tests in `tests/test_gen_results.py`, `tests/test_cf_provider_api.py` and
-most of `tests/test_local_as_client_auth.py` are skipped unless `pyjwt[crypto]`
-is installed.)
+Version 0.4, maintained by one person. Changes by release are in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
